@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsS
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { run, type RunOptions } from '../src/run';
+import { run, RunAbortedError, type RunOptions } from '../src/run';
 
 const SECRET = 'SECRETKEY1234567890abcdef';
 const SESSION = 'SESSIONTOKEN-xyz-987654';
@@ -13,6 +13,7 @@ let calls: Call[];
 let project: string;
 let callsFile: string;
 let logsFailures: number;
+let logsAnswer: { status: number; body: unknown } | null;
 
 function setupProject(): string {
   const dir = mkdtempSync(join(tmpdir(), 'arco-proj-'));
@@ -26,6 +27,7 @@ function setupProject(): string {
 beforeEach(() => {
   calls = [];
   logsFailures = 0;
+  logsAnswer = null;
   project = setupProject();
   callsFile = join(project, 'calls.txt');
   vi.stubGlobal('fetch', async (url: string, init: any) => {
@@ -36,6 +38,7 @@ beforeEach(() => {
       return new Response('boom', { status: 500 });
     }
     calls.push(call);
+    if (path === 'logs' && logsAnswer) return Response.json(logsAnswer.body, { status: logsAnswer.status });
     if (path === 'start') {
       return Response.json({
         credentials: { accessKeyId: ACCESS, secretAccessKey: SECRET, sessionToken: SESSION, expiration: '2026-10-21T13:00:00Z' },
@@ -176,5 +179,58 @@ describe('run', () => {
     vi.stubGlobal('fetch', async () => new Response('no', { status: 403 }));
     await expect(run(opts())).rejects.toThrow('HTTP 403');
     expect(existsSync(callsFile)).toBe(false);
+  });
+
+  it('strips INPUT_* and the Cloud token from the child environment but keeps AWS and the rest', async () => {
+    const dump = join(project, 'env.json');
+    await run(opts({
+      fake: {
+        FAKE_ARCO_ENVDUMP: dump, INPUT_TOKEN: 'bearer-token-abcdef', INPUT_NONCE: 'nonce-123456', 'INPUT_API-URL': 'https://cloud.test',
+        INPUT_ENVIRONMENT: 'production', ARCO_TOKEN: 'x-arco-token', COPIED_TOKEN: 'bearer-token-abcdef', KEEP_ME: 'yes',
+      },
+    }));
+    const env = JSON.parse(readFileSync(dump, 'utf8'));
+    expect(Object.keys(env).filter((k) => k.toUpperCase().startsWith('INPUT_'))).toEqual([]);
+    expect(env).not.toHaveProperty('ARCO_TOKEN');
+    expect(env).not.toHaveProperty('COPIED_TOKEN');
+    expect(env).toMatchObject({ KEEP_ME: 'yes', AWS_ACCESS_KEY_ID: ACCESS, AWS_SECRET_ACCESS_KEY: SECRET, AWS_SESSION_TOKEN: SESSION, AWS_REGION: 'us-east-1' });
+  });
+
+  const pidOf = () => Number(readFileSync(callsFile, 'utf8').match(/^pid (\d+)$/m)![1]);
+  const alive = (pid: number) => {
+    try { process.kill(pid, 0); return true; } catch { return false; }
+  };
+
+  it.each([
+    [409, 'lease_lost'],
+    [409, 'finished'],
+    [403, 'not_runner'],
+  ])('HTTP %i %s on logs stops arco, skips finish and aborts the action', async (status, error) => {
+    logsAnswer = { status, body: { error } };
+    const err = await run(opts({ fake: { FAKE_ARCO_SCENARIO: 'hang' }, batcher: { maxItems: 1, sleep: async () => {} } })).catch((e) => e);
+    expect(err).toBeInstanceOf(RunAbortedError);
+    expect(err.message).toContain(`HTTP ${status}`);
+    expect(err.message).toContain('stopped Arco');
+    expect(alive(pidOf())).toBe(false);
+    expect(calls.some((c) => c.path === 'finish')).toBe(false);
+    expect(logCalls()).toHaveLength(1); // no retries, no further batches
+    expect(readFileSync(callsFile, 'utf8')).not.toContain('info --env'); // nothing runs after the abort
+  });
+
+  it('SIGKILLs an arco that ignores SIGTERM after the grace period', async () => {
+    logsAnswer = { status: 409, body: { error: 'lease_lost' } };
+    const err = await run(opts({ killGraceMs: 200, fake: { FAKE_ARCO_SCENARIO: 'stubborn' }, batcher: { maxItems: 1, sleep: async () => {} } })).catch((e) => e);
+    expect(err).toBeInstanceOf(RunAbortedError);
+    expect(alive(pidOf())).toBe(false);
+    expect(calls.some((c) => c.path === 'finish')).toBe(false);
+  });
+
+  it('other failures (HTTP 409 with another error, 500) are still retried and do not stop arco', async () => {
+    logsAnswer = { status: 409, body: { error: 'duplicate_seq' } };
+    const warn = vi.fn();
+    const code = await run(opts({ warn, batcher: { maxItems: 2, sleep: async () => {} } }));
+    expect(code).toBe(0);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Dropping log batch'));
+    expect(calls.some((c) => c.path === 'finish')).toBe(true);
   });
 });

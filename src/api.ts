@@ -18,6 +18,26 @@ export interface LogsPayload {
   events: unknown[];
 }
 
+/** Non-2xx answer from Arco Cloud; `code` is the `error` field of a JSON body, when present. */
+export class CloudApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | null,
+  ) {
+    super(message);
+    this.name = 'CloudApiError';
+  }
+}
+
+/** Cloud told us this run no longer belongs to us (lease lost, already finished, or another runner). */
+export function isRunLost(e: unknown): e is CloudApiError {
+  return (
+    e instanceof CloudApiError &&
+    ((e.status === 409 && (e.code === 'lease_lost' || e.code === 'finished')) || (e.status === 403 && e.code === 'not_runner'))
+  );
+}
+
 export class CloudApi {
   constructor(
     private readonly baseUrl: string,
@@ -37,7 +57,16 @@ export class CloudApi {
       },
       body: JSON.stringify(body),
     });
-    if (!response.ok) throw new Error(`Arco Cloud ${path} failed with HTTP ${response.status}`);
+    if (!response.ok) {
+      let code: string | null = null;
+      try {
+        const body = (await response.json()) as { error?: unknown };
+        if (typeof body?.error === 'string') code = body.error;
+      } catch {
+        // body is not JSON: no error code
+      }
+      throw new CloudApiError(`Arco Cloud ${path} failed with HTTP ${response.status}`, response.status, code);
+    }
     return response;
   }
 

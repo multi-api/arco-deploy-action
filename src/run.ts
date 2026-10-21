@@ -1,4 +1,4 @@
-import { CloudApi } from './api';
+import { CloudApi, isRunLost } from './api';
 import { Batcher } from './batcher';
 import {
   deployArgs,
@@ -25,7 +25,29 @@ export interface RunOptions {
   env?: NodeJS.ProcessEnv;
   mask?: (secret: string) => void;
   warn?: (message: string) => void;
+  /** Grace between SIGTERM and SIGKILL when Cloud revokes the run. Default 5000. */
+  killGraceMs?: number;
   batcher?: { intervalMs?: number; maxItems?: number; sleep?: (ms: number) => Promise<void> };
+}
+
+/** Cloud revoked this run (lease lost, finished, or not the runner): arco was stopped and nothing more is reported. */
+export class RunAbortedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RunAbortedError';
+  }
+}
+
+/** Variables the child (and so the customer's build hooks) must never see: action inputs and the Cloud API token. */
+export function childBaseEnv(env: NodeJS.ProcessEnv, secrets: string[]): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    const upper = key.toUpperCase();
+    if (upper.startsWith('INPUT_') || upper === 'ARCO_TOKEN') continue;
+    if (value !== undefined && secrets.includes(value)) continue;
+    out[key] = value;
+  }
+  return out;
 }
 
 /** Returns the process exit code the action should mirror (0 = success). */
@@ -43,7 +65,7 @@ export async function run(opts: RunOptions): Promise<number> {
 
   // Credentials live only in the child environment; process.env is never modified.
   const childEnv: NodeJS.ProcessEnv = {
-    ...(opts.env ?? process.env),
+    ...childBaseEnv(opts.env ?? process.env, [opts.token, opts.nonce].filter((v) => v.length >= 4)),
     AWS_ACCESS_KEY_ID: credentials.accessKeyId,
     AWS_SECRET_ACCESS_KEY: credentials.secretAccessKey,
     AWS_SESSION_TOKEN: credentials.sessionToken,
@@ -51,7 +73,14 @@ export async function run(opts: RunOptions): Promise<number> {
     AWS_DEFAULT_REGION: region,
   };
 
+  const controller = new AbortController();
+  let abortMessage: string | null = null;
   const batcher = new Batcher({
+    isFatal: isRunLost,
+    onAbort: (e) => {
+      abortMessage = `Arco Cloud ended this run (${(e as Error).message}); stopped Arco and did not report a result.`;
+      controller.abort();
+    },
     send: (p) => api.logs(p),
     redact,
     onError: warn,
@@ -65,6 +94,8 @@ export async function run(opts: RunOptions): Promise<number> {
     const deploy = await runArco(deployArgs(opts.environment), {
       cwd: opts.workingDirectory,
       env: childEnv,
+      signal: controller.signal,
+      killGraceMs: opts.killGraceMs,
       onStdoutLine: (line) => {
         const event = parseEventLine(line);
         if (event) {
@@ -78,10 +109,15 @@ export async function run(opts: RunOptions): Promise<number> {
     });
     exitCode = deploy.exitCode;
   }
+  // The final batch can still be in flight when arco exits: wait for it so a revoked run is noticed before info/finish.
+  await batcher.flush();
+  if (abortMessage !== null) throw new RunAbortedError(abortMessage);
 
   const info = await runArco(infoArgs(opts.environment), {
     cwd: opts.workingDirectory,
     env: childEnv,
+    signal: controller.signal,
+    killGraceMs: opts.killGraceMs,
     onStderrLine: (line) => batcher.addLine(line),
   });
   const inventory = info.exitCode === 0 ? parseInventory(info.stdout) : null;
@@ -92,6 +128,7 @@ export async function run(opts: RunOptions): Promise<number> {
   if (version.exitCode === 0) arcoVersion = parseVersion(version.stdout);
 
   await batcher.flush();
+  if (abortMessage !== null) throw new RunAbortedError(abortMessage);
 
   const rawPayload: FinishPayload =
     opts.mode === 'deploy'
@@ -120,6 +157,10 @@ async function finishWithRetry(
       await api.finish(payload);
       return;
     } catch (e) {
+      if (isRunLost(e)) {
+        warn(`Arco Cloud rejected the result: ${e.message}`);
+        return;
+      }
       if (attempt === 3) {
         warn(`Could not report the result to Arco Cloud: ${(e as Error).message}`);
         return;

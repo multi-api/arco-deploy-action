@@ -101,6 +101,9 @@ export interface CommandOptions {
   env: NodeJS.ProcessEnv;
   onStdoutLine?: (line: string) => void;
   onStderrLine?: (line: string) => void;
+  /** Aborting stops the child: SIGTERM, then SIGKILL after `killGraceMs`. */
+  signal?: AbortSignal;
+  killGraceMs?: number;
 }
 
 function lineSplitter(emit: (line: string) => void) {
@@ -129,22 +132,45 @@ export function runArco(args: string[], options: CommandOptions): Promise<Comman
     const err = lineSplitter((l) => options.onStderrLine?.(l));
     let child;
     try {
-      child = spawn(ARCO_BIN, args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      // Own process group so the whole tree (build hooks included) can be stopped.
+      child = spawn(ARCO_BIN, args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     } catch (e) {
       options.onStderrLine?.(`Failed to start ${ARCO_BIN}: ${(e as Error).message}`);
       resolve({ exitCode: 127, stdout });
       return;
     }
+    const signalGroup = (sig: NodeJS.Signals) => {
+      try {
+        if (child.pid) process.kill(-child.pid, sig);
+        else child.kill(sig);
+      } catch {
+        try {
+          child.kill(sig);
+        } catch {
+          // already gone
+        }
+      }
+    };
+    let killTimer: NodeJS.Timeout | null = null;
+    const stop = () => {
+      signalGroup('SIGTERM');
+      killTimer = setTimeout(() => signalGroup('SIGKILL'), options.killGraceMs ?? 5000);
+    };
+    if (options.signal?.aborted) stop();
+    else options.signal?.addEventListener('abort', stop, { once: true });
     child.stdout.setEncoding('utf8').on('data', (c: string) => {
       stdout += c;
       out.push(c);
     });
     child.stderr.setEncoding('utf8').on('data', (c: string) => err.push(c));
     child.on('error', (e) => {
+      if (killTimer) clearTimeout(killTimer);
       options.onStderrLine?.(`Failed to run ${ARCO_BIN}: ${e.message}`);
       resolve({ exitCode: 127, stdout });
     });
     child.on('close', (code) => {
+      if (killTimer) clearTimeout(killTimer);
+      options.signal?.removeEventListener('abort', stop);
       out.end();
       err.end();
       resolve({ exitCode: code ?? 1, stdout });
