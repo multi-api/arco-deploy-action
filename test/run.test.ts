@@ -135,6 +135,24 @@ describe('run', () => {
     expect(finish().inventory).toBeDefined();
   });
 
+  it('mode=inventory without an inventory finishes failed and exits non-zero', async () => {
+    for (const info of ['bad', 'fail']) {
+      calls = [];
+      const code = await run(opts({ mode: 'inventory', fake: { FAKE_ARCO_INFO: info } }));
+      expect(code).toBe(1);
+      expect(finish()).toMatchObject({ result: 'failed', error_code: 'arco.inventory_failed' });
+      expect(finish()).not.toHaveProperty('inventory');
+    }
+  });
+
+  it('redacts secrets in the finish payload (error message)', async () => {
+    const code = await run(opts({ fake: { FAKE_ARCO_SCENARIO: 'leakyfail' } }));
+    expect(code).toBe(1);
+    const body = JSON.stringify(calls.find((c) => c.path === 'finish')!.body);
+    expect(body).not.toContain(SECRET);
+    expect(finish().error_message).toContain('***');
+  });
+
   it('does not export credentials into the action process environment', async () => {
     await run(opts());
     expect(process.env.AWS_SECRET_ACCESS_KEY).toBeUndefined();

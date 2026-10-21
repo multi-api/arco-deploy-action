@@ -11,6 +11,7 @@ import {
   toFinishPayload,
   versionArgs,
   type ArcoResult,
+  type FinishPayload,
 } from './arco';
 
 export interface RunOptions {
@@ -92,15 +93,20 @@ export async function run(opts: RunOptions): Promise<number> {
 
   await batcher.flush();
 
-  const payload =
+  const rawPayload: FinishPayload =
     opts.mode === 'deploy'
       ? toFinishPayload(result, exitCode, arcoVersion, inventory)
-      : // inventory mode: nothing was deployed, so the request itself succeeded
-        { result: 'succeeded' as const, revision: null, rolled_back: false, error_code: null, error_message: null, arco_version: arcoVersion, ...(inventory !== null ? { inventory } : {}) };
+      : inventory !== null
+        ? { result: 'succeeded', revision: null, rolled_back: false, error_code: null, error_message: null, arco_version: arcoVersion, inventory }
+        : // inventory mode exists only to obtain the inventory: without it the request failed
+          { result: 'failed', revision: null, rolled_back: false, error_code: 'arco.inventory_failed', error_message: 'Could not collect the resource inventory', arco_version: arcoVersion };
+  // Arco's messages and inventory are untrusted text: redact like every other outbound string.
+  const payload = JSON.parse(redact(JSON.stringify(rawPayload))) as FinishPayload;
 
   await finishWithRetry(api, payload, opts.batcher?.sleep, warn);
 
-  return opts.mode === 'deploy' && payload.result === 'failed' ? exitCode || 1 : 0;
+  if (payload.result === 'succeeded') return 0;
+  return opts.mode === 'deploy' ? exitCode || 1 : 1;
 }
 
 async function finishWithRetry(

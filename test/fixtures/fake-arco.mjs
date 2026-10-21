@@ -25,6 +25,10 @@ if (args[0] === '--version') {
     emit({ type: 'result', outcome: 'failed', app: 'shop', environment: 'production', revision: 'r41', url: null, domains: [], rolled_back: true, cold_start_ms: null, error: { key: 'deploy.health_check_failed', message: 'Health check failed' } });
     process.exit(1);
   }
+  if (scenario === 'leakyfail') {
+    emit({ type: 'result', outcome: 'failed', app: 'shop', environment: 'production', revision: null, url: null, domains: [], rolled_back: false, cold_start_ms: null, error: { key: 'deploy.boom', message: `denied for ${process.env.AWS_SECRET_ACCESS_KEY}` } });
+    process.exit(1);
+  }
   emit({ type: 'result', outcome: 'deployed', app: 'shop', environment: 'production', revision: 'r42', url: 'https://x.example', domains: [], rolled_back: false, cold_start_ms: 120, error: null });
 } else if (args[0] === 'info') {
   const mode = process.env.FAKE_ARCO_INFO ?? 'ok';
