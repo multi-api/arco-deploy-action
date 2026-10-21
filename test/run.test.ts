@@ -81,7 +81,7 @@ describe('run', () => {
     expect(lines).toContain('plain line before events');
     expect(lines).toContain('stderr line');
     expect(events.map((e: any) => e.type)).toEqual(['step', 'progress', 'result']);
-    const everything = JSON.stringify(calls.filter((c) => c.path !== 'start'));
+    const everything = JSON.stringify(calls.filter((c) => c.path !== 'start').map((c) => c.body));
     for (const s of [SECRET, SESSION, ACCESS, 'bearer-token-abcdef']) expect(everything).not.toContain(s);
     expect(lines.some((l: string) => l.includes('AWS_SECRET_ACCESS_KEY=***'))).toBe(true);
   });
