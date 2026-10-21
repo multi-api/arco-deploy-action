@@ -1,0 +1,22 @@
+{
+  "name": "arco-deploy-action",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GitHub Action that runs an Arco deploy on behalf of Arco Cloud",
+  "main": "dist/index.js",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "ncc build src/index.ts -o dist --minify --no-source-map-register --license licenses.txt"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@actions/core": "^1.11.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@vercel/ncc": "^0.38.3",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.8"
+  }
+}

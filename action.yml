@@ -1,0 +1,30 @@
+name: Arco Cloud deploy
+description: Runs an Arco deployment requested by Arco Cloud and reports logs and the result back.
+author: multi-api
+inputs:
+  token:
+    description: Short-lived deployment token issued by Arco Cloud.
+    required: true
+  api-url:
+    description: Base URL of the Arco Cloud API.
+    required: true
+  environment:
+    description: Arco environment to deploy.
+    required: true
+  deployment_id:
+    description: Arco Cloud deployment id.
+    required: true
+  nonce:
+    description: One-time nonce used to obtain AWS credentials.
+    required: true
+  mode:
+    description: '"deploy" runs a deployment; "inventory" only reports the resource inventory.'
+    required: false
+    default: deploy
+  working-directory:
+    description: Directory containing the Arco project (where vendor/bin/arco lives).
+    required: false
+    default: '.'
+runs:
+  using: node24
+  main: dist/index.js
