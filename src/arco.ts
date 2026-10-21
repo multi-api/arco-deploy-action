@@ -8,7 +8,7 @@ export type ArcoEvent = { schema: 1; type: string; [key: string]: unknown };
 
 export interface ArcoResult extends ArcoEvent {
   type: 'result';
-  outcome: 'deployed' | 'failed' | 'refused';
+  outcome: 'deployed' | 'removed' | 'failed' | 'refused';
   revision?: string | null;
   rolled_back?: boolean;
   error?: { key?: string; message?: string } | null;
@@ -24,7 +24,9 @@ export interface FinishPayload {
   inventory?: unknown;
 }
 
-export const deployArgs = (environment: string): string[] => ['deploy', `--env=${environment}`, '--json'];
+// --json never prompts: a dispatch from Cloud is already user-confirmed, so always pass --yes
+// (otherwise a first deploy of an environment is `refused` with deploy.confirm_required).
+export const deployArgs = (environment: string): string[] => ['deploy', `--env=${environment}`, '--yes', '--json'];
 export const infoArgs = (environment: string): string[] => ['info', `--env=${environment}`, '--resources', '--json'];
 export const versionArgs = (): string[] => ['--version'];
 
@@ -49,7 +51,8 @@ export const isResult = (event: ArcoEvent): event is ArcoResult => event.type ==
 export function parseInventory(stdout: string): unknown | null {
   try {
     const value = JSON.parse(stdout);
-    return value && typeof value === 'object' && !Array.isArray(value) && Array.isArray((value as any).resources)
+    // `info` adds an `error` key when AWS could not be read: that listing is not a trustworthy inventory.
+    return value && typeof value === 'object' && !Array.isArray(value) && Array.isArray((value as any).resources) && !(value as any).error
       ? value
       : null;
   } catch {
@@ -78,7 +81,8 @@ export function toFinishPayload(
   const payload: FinishPayload = {
     result: succeeded ? 'succeeded' : 'failed',
     revision: result?.revision ?? null,
-    rolled_back: result?.rolled_back ?? false,
+    // `refused` means Arco stopped before changing anything, so nothing can have been rolled back.
+    rolled_back: result?.outcome === 'refused' ? false : (result?.rolled_back ?? false),
     error_code: errorCode,
     error_message: errorMessage,
     arco_version: arcoVersion,

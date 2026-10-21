@@ -70,7 +70,7 @@ describe('run', () => {
     expect(finish()).toMatchObject({ result: 'succeeded', revision: 'r42', rolled_back: false, error_code: null, error_message: null, arco_version: '0.10.0' });
     expect(finish().inventory.resources[0].name).toBe('jobs');
     const argv = readFileSync(callsFile, 'utf8').trim().split('\n');
-    expect(argv).toContain('deploy --env=production --json');
+    expect(argv).toContain('deploy --env=production --yes --json');
     expect(argv).toContain('info --env=production --resources --json');
   });
 
@@ -80,7 +80,8 @@ describe('run', () => {
     const events = logCalls().flatMap((c) => c.body.events);
     expect(lines).toContain('plain line before events');
     expect(lines).toContain('stderr line');
-    expect(events.map((e: any) => e.type)).toEqual(['step', 'progress', 'result']);
+    expect(events.map((e: any) => e.type)).toEqual(['step', 'progress', 'result'])
+    expect(events[1].key).toBe('binary.download');
     const everything = JSON.stringify(calls.filter((c) => c.path !== 'start').map((c) => c.body));
     for (const s of [SECRET, SESSION, ACCESS, 'bearer-token-abcdef']) expect(everything).not.toContain(s);
     expect(lines.some((l: string) => l.includes('AWS_SECRET_ACCESS_KEY=***'))).toBe(true);
@@ -109,6 +110,19 @@ describe('run', () => {
     expect(code).toBe(1);
     expect(finish()).toMatchObject({ result: 'failed', revision: 'r41', rolled_back: true, error_code: 'deploy.health_check_failed', error_message: 'Health check failed' });
     expect(finish().inventory.resources).toHaveLength(1);
+  });
+
+  it('maps refused to failed with the error key and rolled_back false', async () => {
+    const code = await run(opts({ fake: { FAKE_ARCO_SCENARIO: 'refused' } }));
+    expect(code).toBe(1);
+    expect(finish()).toMatchObject({ result: 'failed', error_code: 'deploy.confirm_required', error_message: 'Confirmation needed', rolled_back: false });
+  });
+
+  it('an option error (exit 1, no result line) finishes failed with arco.no_result', async () => {
+    const code = await run(opts({ fake: { FAKE_ARCO_SCENARIO: 'opterror' } }));
+    expect(code).toBe(1);
+    expect(finish()).toMatchObject({ result: 'failed', error_code: 'arco.no_result', rolled_back: false });
+    expect(logCalls().flatMap((c) => c.body.lines)).toContain('The "--bogus" option does not exist.');
   });
 
   it('a crash without a result document finishes failed with a synthetic error', async () => {
