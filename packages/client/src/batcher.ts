@@ -1,4 +1,4 @@
-import type { LogsPayload } from './api';
+import type { LogsPayload } from './api.js';
 
 export interface BatcherOptions {
   send: (payload: LogsPayload) => Promise<void>;

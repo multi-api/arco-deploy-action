@@ -118,6 +118,13 @@ export interface CommandOptions {
   /** Aborting stops the child: SIGTERM, then SIGKILL after `killGraceMs`. */
   signal?: AbortSignal;
   killGraceMs?: number;
+  uid?: number;
+  gid?: number;
+  /**
+   * When set, resolve this many ms after the process emits 'exit' even if its stdout/stderr are still open
+   * (held by a background grandchild), then stop reading them. Unset: resolve on 'close'.
+   */
+  settleAfterExitMs?: number;
 }
 
 function lineSplitter(emit: (line: string) => void) {
@@ -138,8 +145,8 @@ function lineSplitter(emit: (line: string) => void) {
   };
 }
 
-/** Runs `vendor/bin/arco <args>` in cwd, delivering stdout/stderr line by line. Never rejects. */
-export function runArco(args: string[], options: CommandOptions): Promise<CommandResult> {
+/** Runs `file <args>` in cwd, delivering stdout/stderr line by line. Never rejects. */
+export function runCommand(file: string, args: string[], options: CommandOptions): Promise<CommandResult> {
   return new Promise((resolve) => {
     let stdout = '';
     const out = lineSplitter((l) => options.onStdoutLine?.(l));
@@ -147,9 +154,16 @@ export function runArco(args: string[], options: CommandOptions): Promise<Comman
     let child;
     try {
       // Own process group so the whole tree (build hooks included) can be stopped.
-      child = spawn(ARCO_BIN, args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+      child = spawn(file, args, {
+        cwd: options.cwd,
+        env: options.env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: true,
+        ...(options.uid !== undefined ? { uid: options.uid } : {}),
+        ...(options.gid !== undefined ? { gid: options.gid } : {}),
+      });
     } catch (e) {
-      options.onStderrLine?.(`Failed to start ${ARCO_BIN}: ${(e as Error).message}`);
+      options.onStderrLine?.(`Failed to start ${file}: ${(e as Error).message}`);
       resolve({ exitCode: 127, stdout });
       return;
     }
@@ -166,28 +180,50 @@ export function runArco(args: string[], options: CommandOptions): Promise<Comman
       }
     };
     let killTimer: NodeJS.Timeout | null = null;
+    let settleTimer: NodeJS.Timeout | null = null;
+    let done = false;
     const stop = () => {
       signalGroup('SIGTERM');
       killTimer = setTimeout(() => signalGroup('SIGKILL'), options.killGraceMs ?? 5000);
     };
-    if (options.signal?.aborted) stop();
-    else options.signal?.addEventListener('abort', stop, { once: true });
-    child.stdout.setEncoding('utf8').on('data', (c: string) => {
-      stdout += c;
-      out.push(c);
-    });
-    child.stderr.setEncoding('utf8').on('data', (c: string) => err.push(c));
-    child.on('error', (e) => {
+    const finish = (exitCode: number) => {
+      if (done) return;
+      done = true;
       if (killTimer) clearTimeout(killTimer);
-      options.onStderrLine?.(`Failed to run ${ARCO_BIN}: ${e.message}`);
-      resolve({ exitCode: 127, stdout });
-    });
-    child.on('close', (code) => {
-      if (killTimer) clearTimeout(killTimer);
+      if (settleTimer) clearTimeout(settleTimer);
       options.signal?.removeEventListener('abort', stop);
       out.end();
       err.end();
-      resolve({ exitCode: code ?? 1, stdout });
+      resolve({ exitCode, stdout });
+    };
+    if (options.signal?.aborted) stop();
+    else options.signal?.addEventListener('abort', stop, { once: true });
+    child.stdout.setEncoding('utf8').on('data', (c: string) => {
+      if (done) return;
+      stdout += c;
+      out.push(c);
     });
+    child.stderr.setEncoding('utf8').on('data', (c: string) => {
+      if (!done) err.push(c);
+    });
+    child.on('error', (e) => {
+      if (done) return;
+      options.onStderrLine?.(`Failed to run ${file}: ${e.message}`);
+      finish(127);
+    });
+    if (options.settleAfterExitMs !== undefined) {
+      child.on('exit', (code) => {
+        settleTimer = setTimeout(() => {
+          // A background grandchild still holds the pipes: stop reading them and report the exit code.
+          child.stdout.destroy();
+          child.stderr.destroy();
+          finish(code ?? 1);
+        }, options.settleAfterExitMs);
+      });
+    }
+    child.on('close', (code) => finish(code ?? 1));
   });
 }
+
+/** Runs `vendor/bin/arco <args>` in cwd. Never rejects. */
+export const runArco = (args: string[], options: CommandOptions): Promise<CommandResult> => runCommand(ARCO_BIN, args, options);

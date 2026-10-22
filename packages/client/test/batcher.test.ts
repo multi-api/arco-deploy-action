@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Batcher } from '../src/batcher';
+import { Batcher } from '../src/batcher.js';
 
 describe('Batcher', () => {
   it('flushes on the interval', async () => {

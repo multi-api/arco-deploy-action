@@ -1,0 +1,210 @@
+import { CloudApi, isRunLost, type StartResponse } from './api.js';
+import { Batcher, type BatcherOptions } from './batcher.js';
+import {
+  deployArgs,
+  infoArgs,
+  isResult,
+  parseEventLine,
+  parseInventory,
+  parseVersion,
+  runArco,
+  toFinishPayload,
+  versionArgs,
+  type ArcoResult,
+  type FinishPayload,
+} from './arco.js';
+
+/** Cloud revoked this run (lease lost, finished, or not the runner): arco was stopped and nothing more is reported. */
+export class RunAbortedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RunAbortedError';
+  }
+}
+
+/** A finish payload for a run that failed before (or without) producing an Arco result. */
+export function buildFailure(code: string, message: string): FinishPayload {
+  return { result: 'failed', revision: null, rolled_back: false, error_code: code, error_message: message, arco_version: null };
+}
+
+export async function finishWithRetry(
+  api: CloudApi,
+  payload: unknown,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+  warn: (m: string) => void = () => {},
+): Promise<void> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      await api.finish(payload);
+      return;
+    } catch (e) {
+      if (isRunLost(e)) {
+        warn(`Arco Cloud rejected the result: ${e.message}`);
+        return;
+      }
+      if (attempt === 3) {
+        warn(`Could not report the result to Arco Cloud: ${(e as Error).message}`);
+        return;
+      }
+      await sleep(500 * 2 ** attempt);
+    }
+  }
+}
+
+export interface StartRunOptions {
+  api: CloudApi;
+  nonce: string;
+  /** The Cloud API token: only used to redact it from outbound text. */
+  token: string;
+  /** Extra redaction applied after the built-in secret redaction. */
+  redact?: (text: string) => string;
+  extraSecrets?: string[];
+  warn?: (message: string) => void;
+  batcher?: Partial<BatcherOptions>;
+}
+
+export interface RunSession {
+  api: CloudApi;
+  started: StartResponse;
+  /** Every value that must never leave the machine: AWS credentials, token, nonce and extras. */
+  secrets: string[];
+  redact: (text: string) => string;
+  batcher: Batcher;
+  /** Aborted when Cloud ends the run. */
+  signal: AbortSignal;
+  abortMessage(): string | null;
+  /** The AWS_* variables for the child process. */
+  awsEnv: Record<string, string>;
+  warn: (message: string) => void;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** Calls start, derives the secrets and redaction, and wires a log batcher that aborts the run when Cloud revokes it. */
+export async function startRun(o: StartRunOptions): Promise<RunSession> {
+  const warn = o.warn ?? (() => {});
+  const started = await o.api.start(o.nonce);
+  const { credentials, region } = started;
+
+  const secrets = [credentials.accessKeyId, credentials.secretAccessKey, credentials.sessionToken, o.token, o.nonce, ...(o.extraSecrets ?? [])].filter(
+    (s) => typeof s === 'string' && s.length >= 4,
+  );
+  const redactSecrets = (text: string) => secrets.reduce((t, s) => t.split(s).join('***'), text);
+  const redact = o.redact ? (text: string) => o.redact!(redactSecrets(text)) : redactSecrets;
+
+  const controller = new AbortController();
+  let abortMessage: string | null = null;
+  const batcher = new Batcher({
+    isFatal: isRunLost,
+    onAbort: (e) => {
+      abortMessage = `Arco Cloud ended this run (${(e as Error).message}); stopped Arco and did not report a result.`;
+      controller.abort();
+    },
+    send: (p) => o.api.logs(p),
+    redact,
+    onError: warn,
+    ...o.batcher,
+  });
+
+  return {
+    api: o.api,
+    started,
+    secrets,
+    redact,
+    batcher,
+    signal: controller.signal,
+    abortMessage: () => abortMessage,
+    awsEnv: {
+      AWS_ACCESS_KEY_ID: credentials.accessKeyId,
+      AWS_SECRET_ACCESS_KEY: credentials.secretAccessKey,
+      AWS_SESSION_TOKEN: credentials.sessionToken,
+      AWS_REGION: region,
+      AWS_DEFAULT_REGION: region,
+    },
+    warn,
+    sleep: o.batcher?.sleep,
+  };
+}
+
+export interface DeployOptions {
+  mode: 'deploy' | 'inventory';
+  environment: string;
+  cwd: string;
+  /** Base environment of the child; the AWS_* variables are added on top. */
+  env: NodeJS.ProcessEnv;
+  uid?: number;
+  gid?: number;
+  /** Grace between SIGTERM and SIGKILL when Cloud revokes the run. Default 5000. */
+  killGraceMs?: number;
+}
+
+/** deploy -> info -> version -> finish. Returns the process exit code to mirror (0 = success). */
+export async function deployAndFinish(s: RunSession, o: DeployOptions): Promise<number> {
+  const childEnv: NodeJS.ProcessEnv = { ...o.env, ...s.awsEnv };
+  // Only deploys get the boundary (not inventory, info or --version), and only when Cloud sent a non-empty string.
+  const boundary = s.started.permissionsBoundary;
+  const deployEnv: NodeJS.ProcessEnv =
+    o.mode === 'deploy' && typeof boundary === 'string' && boundary !== '' ? { ...childEnv, ARCO_PERMISSIONS_BOUNDARY: boundary } : childEnv;
+  const common = { cwd: o.cwd, uid: o.uid, gid: o.gid };
+  const throwIfAborted = () => {
+    const message = s.abortMessage();
+    if (message !== null) throw new RunAbortedError(message);
+  };
+
+  let exitCode = 0;
+  let result: ArcoResult | null = null;
+
+  if (o.mode === 'deploy') {
+    const deploy = await runArco(deployArgs(o.environment), {
+      ...common,
+      env: deployEnv,
+      signal: s.signal,
+      killGraceMs: o.killGraceMs,
+      onStdoutLine: (line) => {
+        const event = parseEventLine(line);
+        if (event) {
+          s.batcher.addEvent(event);
+          if (isResult(event)) result = event;
+        } else {
+          s.batcher.addLine(line);
+        }
+      },
+      onStderrLine: (line) => s.batcher.addLine(line),
+    });
+    exitCode = deploy.exitCode;
+  }
+  // The final batch can still be in flight when arco exits: wait for it so a revoked run is noticed before info/finish.
+  await s.batcher.flush();
+  throwIfAborted();
+
+  const info = await runArco(infoArgs(o.environment), {
+    ...common,
+    env: childEnv,
+    signal: s.signal,
+    killGraceMs: o.killGraceMs,
+    onStderrLine: (line) => s.batcher.addLine(line),
+  });
+  const inventory = info.exitCode === 0 ? parseInventory(info.stdout) : null;
+  if (inventory === null) s.batcher.addLine('Could not collect the resource inventory.');
+
+  let arcoVersion: string | null = null;
+  const version = await runArco(versionArgs(), { ...common, env: childEnv });
+  if (version.exitCode === 0) arcoVersion = parseVersion(version.stdout);
+
+  await s.batcher.flush();
+  throwIfAborted();
+
+  const rawPayload: FinishPayload =
+    o.mode === 'deploy'
+      ? toFinishPayload(result, exitCode, arcoVersion, inventory)
+      : inventory !== null
+        ? { result: 'succeeded', revision: null, rolled_back: false, error_code: null, error_message: null, arco_version: arcoVersion, inventory }
+        : // inventory mode exists only to obtain the inventory: without it the request failed
+          { result: 'failed', revision: null, rolled_back: false, error_code: 'arco.inventory_failed', error_message: 'Could not collect the resource inventory', arco_version: arcoVersion };
+  // Arco's messages and inventory are untrusted text: redact like every other outbound string.
+  const payload = JSON.parse(s.redact(JSON.stringify(rawPayload))) as FinishPayload;
+
+  await finishWithRetry(s.api, payload, s.sleep, s.warn);
+
+  if (payload.result === 'succeeded') return 0;
+  return o.mode === 'deploy' ? exitCode || 1 : 1;
+}
