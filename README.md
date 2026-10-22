@@ -37,3 +37,9 @@ npm run build     # builds packages/client, then ncc bundles the action into dis
 
 The Cloud protocol client (API, log batching, deploy session) lives in `packages/client` and is published as
 `@multiapi/arco-cloud-client`; the action in `src/` is a thin composition of it.
+
+## Releasing `@multiapi/arco-cloud-client`
+
+Bump `packages/client/package.json` `version`, merge, then push a tag `client-v<version>` on `main`. The
+`Publish client` workflow stages the release on npm (trusted publishing with provenance); approve it on
+npmjs.com (or `npm stage approve <stage-id>`) with 2FA to make it public.
