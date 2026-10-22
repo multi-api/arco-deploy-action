@@ -10,6 +10,8 @@ export interface StartResponse {
   region: string;
   environment: string;
   mode: string;
+  /** IAM permissions boundary ARN for v2 connect accounts; null/absent for v1 accounts and older Cloud. */
+  permissionsBoundary?: string | null;
 }
 
 export interface LogsPayload {

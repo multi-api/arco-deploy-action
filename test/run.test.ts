@@ -13,6 +13,7 @@ let calls: Call[];
 let project: string;
 let callsFile: string;
 let logsFailures: number;
+let startExtra: Record<string, unknown>;
 let logsAnswer: { status: number; body: unknown } | null;
 
 function setupProject(): string {
@@ -27,6 +28,7 @@ function setupProject(): string {
 beforeEach(() => {
   calls = [];
   logsFailures = 0;
+  startExtra = {};
   logsAnswer = null;
   project = setupProject();
   callsFile = join(project, 'calls.txt');
@@ -42,7 +44,7 @@ beforeEach(() => {
     if (path === 'start') {
       return Response.json({
         credentials: { accessKeyId: ACCESS, secretAccessKey: SECRET, sessionToken: SESSION, expiration: '2026-10-21T13:00:00Z' },
-        region: 'us-east-1', environment: 'production', mode: 'deploy',
+        region: 'us-east-1', environment: 'production', mode: 'deploy', ...startExtra,
       });
     }
     return new Response(null, { status: 204 });
@@ -232,5 +234,37 @@ describe('run', () => {
     expect(code).toBe(0);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('Dropping log batch'));
     expect(calls.some((c) => c.path === 'finish')).toBe(true);
+  });
+
+  describe('permissions boundary', () => {
+    const BOUNDARY = 'arn:aws:iam::123456789012:policy/ArcoCloudBoundary';
+    const dumped = async (extra: Partial<RunOptions> & { fake?: Record<string, string> }, cmd: string) => {
+      const dump = join(project, 'env.json');
+      await run(opts({ fake: { FAKE_ARCO_ENVDUMP: dump, INPUT_TOKEN: 'bearer-token-abcdef', ARCO_TOKEN: 'x' }, ...extra }));
+      return JSON.parse(readFileSync(`${dump}.${cmd}`, 'utf8'));
+    };
+
+    it('is set as ARCO_PERMISSIONS_BOUNDARY for a deploy, with filtering intact', async () => {
+      startExtra = { permissionsBoundary: BOUNDARY };
+      const env = await dumped({}, 'deploy');
+      expect(env.ARCO_PERMISSIONS_BOUNDARY).toBe(BOUNDARY);
+      expect(env).not.toHaveProperty('INPUT_TOKEN');
+      expect(env).not.toHaveProperty('ARCO_TOKEN');
+      expect(env).toMatchObject({ AWS_ACCESS_KEY_ID: ACCESS });
+    });
+
+    it.each([[null], [''], [undefined]])('is absent for a deploy when the boundary is %j, even if the runner env had one', async (value) => {
+      startExtra = value === undefined ? {} : { permissionsBoundary: value };
+      const env = await dumped({ fake: { FAKE_ARCO_ENVDUMP: join(project, 'env.json'), ARCO_PERMISSIONS_BOUNDARY: 'arn:stale' } }, 'deploy');
+      expect(env).not.toHaveProperty('ARCO_PERMISSIONS_BOUNDARY');
+    });
+
+    it('is absent for inventory runs even when Cloud sends a boundary', async () => {
+      startExtra = { permissionsBoundary: BOUNDARY, mode: 'inventory' };
+      const dump = join(project, 'env.json');
+      await run(opts({ mode: 'inventory', fake: { FAKE_ARCO_ENVDUMP: dump } }));
+      expect(existsSync(`${dump}.deploy`)).toBe(false);
+      for (const cmd of ['info', '--version']) expect(JSON.parse(readFileSync(`${dump}.${cmd}`, 'utf8'))).not.toHaveProperty('ARCO_PERMISSIONS_BOUNDARY');
+    });
   });
 });

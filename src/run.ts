@@ -38,12 +38,12 @@ export class RunAbortedError extends Error {
   }
 }
 
-/** Variables the child (and so the customer's build hooks) must never see: action inputs and the Cloud API token. */
+/** Variables the child (and so the customer's build hooks) must never see: action inputs and the Cloud API token. A stale ARCO_PERMISSIONS_BOUNDARY is dropped too: only Cloud's start response may set it. */
 export function childBaseEnv(env: NodeJS.ProcessEnv, secrets: string[]): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(env)) {
     const upper = key.toUpperCase();
-    if (upper.startsWith('INPUT_') || upper === 'ARCO_TOKEN') continue;
+    if (upper.startsWith('INPUT_') || upper === 'ARCO_TOKEN' || upper === 'ARCO_PERMISSIONS_BOUNDARY') continue;
     if (value !== undefined && secrets.includes(value)) continue;
     out[key] = value;
   }
@@ -73,6 +73,13 @@ export async function run(opts: RunOptions): Promise<number> {
     AWS_DEFAULT_REGION: region,
   };
 
+  // Only deploys get the boundary (not inventory, info or --version), and only when Cloud sent a non-empty string.
+  const boundary = started.permissionsBoundary;
+  const deployEnv: NodeJS.ProcessEnv =
+    opts.mode === 'deploy' && typeof boundary === 'string' && boundary !== ''
+      ? { ...childEnv, ARCO_PERMISSIONS_BOUNDARY: boundary }
+      : childEnv;
+
   const controller = new AbortController();
   let abortMessage: string | null = null;
   const batcher = new Batcher({
@@ -93,7 +100,7 @@ export async function run(opts: RunOptions): Promise<number> {
   if (opts.mode === 'deploy') {
     const deploy = await runArco(deployArgs(opts.environment), {
       cwd: opts.workingDirectory,
-      env: childEnv,
+      env: deployEnv,
       signal: controller.signal,
       killGraceMs: opts.killGraceMs,
       onStdoutLine: (line) => {

@@ -10,6 +10,7 @@ import { appendFileSync, writeFileSync } from 'node:fs';
 const args = process.argv.slice(2);
 if (process.env.FAKE_ARCO_CALLS) appendFileSync(process.env.FAKE_ARCO_CALLS, args.join(' ') + '\n');
 if (process.env.FAKE_ARCO_ENVDUMP) writeFileSync(process.env.FAKE_ARCO_ENVDUMP, JSON.stringify(process.env));
+if (process.env.FAKE_ARCO_ENVDUMP) writeFileSync(`${process.env.FAKE_ARCO_ENVDUMP}.${args[0]}`, JSON.stringify(process.env)); // per-command dump
 const scenario = process.env.FAKE_ARCO_SCENARIO ?? 'deployed';
 const at = '2026-10-21T12:00:00Z';
 const emit = (o) => console.log(JSON.stringify({ schema: 1, at, ...o }));
