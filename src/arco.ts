@@ -10,6 +10,9 @@ export interface ArcoResult extends ArcoEvent {
   type: 'result';
   outcome: 'deployed' | 'removed' | 'failed' | 'refused';
   revision?: string | null;
+  url?: unknown;
+  domains?: unknown;
+  cold_start_ms?: unknown;
   rolled_back?: boolean;
   error?: { key?: string; message?: string } | null;
 }
@@ -22,6 +25,10 @@ export interface FinishPayload {
   error_message: string | null;
   arco_version: string | null;
   inventory?: unknown;
+  /** Deploy mode only, and only when Arco's result carried a well-formed value. Older Cloud ignores them. */
+  url?: string | null;
+  domains?: string[] | null;
+  cold_start_ms?: number | null;
 }
 
 // --json never prompts: a dispatch from Cloud is already user-confirmed, so always pass --yes
@@ -87,6 +94,13 @@ export function toFinishPayload(
     error_message: errorMessage,
     arco_version: arcoVersion,
   };
+  if (result) {
+    // Forward only well-formed values; anything malformed is dropped rather than sent.
+    const { url, domains, cold_start_ms: coldStartMs } = result;
+    if (url === null || typeof url === 'string') payload.url = url;
+    if (domains === null || (Array.isArray(domains) && domains.every((d) => typeof d === 'string'))) payload.domains = domains as string[] | null;
+    if (coldStartMs === null || (typeof coldStartMs === 'number' && Number.isFinite(coldStartMs))) payload.cold_start_ms = coldStartMs;
+  }
   if (inventory !== null) payload.inventory = inventory;
   return payload;
 }

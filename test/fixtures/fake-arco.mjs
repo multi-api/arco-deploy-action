@@ -47,7 +47,12 @@ if (args[0] === '--version') {
     emit({ type: 'result', outcome: 'failed', app: 'shop', environment: 'production', revision: null, url: null, domains: [], rolled_back: false, cold_start_ms: null, error: { key: 'deploy.boom', message: `denied for ${process.env.AWS_SECRET_ACCESS_KEY}` } });
     process.exit(1);
   }
-  emit({ type: 'result', outcome: 'deployed', app: 'shop', environment: 'production', revision: 'r42', url: 'https://x.example', domains: [], rolled_back: false, cold_start_ms: 120, error: null });
+  const base = { type: 'result', outcome: 'deployed', app: 'shop', environment: 'production', revision: 'r42', url: 'https://x.example', domains: [], rolled_back: false, cold_start_ms: 120, error: null };
+  // FAKE_ARCO_RESULT = JSON merged over the deployed result; a null value deletes the key.
+  const over = JSON.parse(process.env.FAKE_ARCO_RESULT ?? '{}');
+  const merged = { ...base, ...over };
+  for (const k of Object.keys(merged)) if (merged[k] === '__absent__') delete merged[k];
+  emit(merged);
 } else if (args[0] === 'info') {
   const mode = process.env.FAKE_ARCO_INFO ?? 'ok';
   if (mode === 'fail') process.exit(1);

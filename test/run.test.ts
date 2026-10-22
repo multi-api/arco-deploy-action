@@ -267,4 +267,42 @@ describe('run', () => {
       for (const cmd of ['info', '--version']) expect(JSON.parse(readFileSync(`${dump}.${cmd}`, 'utf8'))).not.toHaveProperty('ARCO_PERMISSIONS_BOUNDARY');
     });
   });
+
+  describe('url, domains and cold_start_ms', () => {
+    const withResult = (r: Record<string, unknown>) => opts({ fake: { FAKE_ARCO_RESULT: JSON.stringify(r) } });
+
+    it('forwards a deployed result with url, domains and cold start', async () => {
+      await run(withResult({ url: 'https://abc.lambda-url.us-east-1.on.aws/', domains: ['https://shop.example', 'https://www.shop.example'], cold_start_ms: 250 }));
+      expect(finish()).toMatchObject({ result: 'succeeded', url: 'https://abc.lambda-url.us-east-1.on.aws/', domains: ['https://shop.example', 'https://www.shop.example'], cold_start_ms: 250 });
+    });
+
+    it('sends missing fields as absent and null fields as null', async () => {
+      await run(withResult({ url: '__absent__', domains: '__absent__', cold_start_ms: '__absent__' }));
+      for (const k of ['url', 'domains', 'cold_start_ms']) expect(finish()).not.toHaveProperty(k);
+      calls = [];
+      await run(withResult({ url: null, domains: null, cold_start_ms: null }));
+      expect(finish()).toMatchObject({ url: null, domains: null, cold_start_ms: null });
+    });
+
+    it('drops malformed values but keeps the valid ones', async () => {
+      await run(withResult({ url: 42, domains: ['https://ok.example', 7], cold_start_ms: '120' }));
+      for (const k of ['url', 'domains', 'cold_start_ms']) expect(finish()).not.toHaveProperty(k);
+      calls = [];
+      await run(withResult({ url: { a: 1 }, domains: 'https://x', cold_start_ms: 90 }));
+      expect(finish()).not.toHaveProperty('url');
+      expect(finish()).not.toHaveProperty('domains');
+      expect(finish().cold_start_ms).toBe(90);
+    });
+
+    it('still redacts secrets inside forwarded values', async () => {
+      await run(withResult({ url: `https://x.example/?k=${SECRET}` }));
+      expect(JSON.stringify(finish())).not.toContain(SECRET);
+      expect(finish().url).toContain('***');
+    });
+
+    it('inventory mode does not forward them', async () => {
+      await run(opts({ mode: 'inventory', fake: { FAKE_ARCO_RESULT: JSON.stringify({ url: 'https://x.example' }) } }));
+      for (const k of ['url', 'domains', 'cold_start_ms']) expect(finish()).not.toHaveProperty(k);
+    });
+  });
 });
