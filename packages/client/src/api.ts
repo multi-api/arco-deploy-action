@@ -40,16 +40,40 @@ export function isRunLost(e: unknown): e is CloudApiError {
   );
 }
 
+export interface CloudApiOptions {
+  /** Per-request timeout (connect, headers and body). A timeout is a plain Error, retried like a network error. Default 30000. */
+  timeoutMs?: number;
+}
+
 export class CloudApi {
+  private readonly timeoutMs: number;
+
   constructor(
     private readonly baseUrl: string,
     private readonly token: string,
     private readonly deploymentId: string,
-  ) {}
+    options: CloudApiOptions = {},
+  ) {
+    this.timeoutMs = options.timeoutMs ?? 30000;
+  }
 
-  private async post(path: string, body: unknown): Promise<Response> {
+  /** POSTs `body`; resolves to the parsed JSON answer when `readJson`, else undefined. The timeout covers the body read too. */
+  private async post(path: string, body: unknown, readJson = false): Promise<unknown> {
+    try {
+      const response = await this.request(path, body);
+      return readJson ? await response.json() : undefined;
+    } catch (e) {
+      if (e instanceof DOMException && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
+        throw new Error(`Arco Cloud ${path} timed out after ${this.timeoutMs} ms`);
+      }
+      throw e;
+    }
+  }
+
+  private async request(path: string, body: unknown): Promise<Response> {
     const url = `${this.baseUrl.replace(/\/+$/, '')}/api/v1/deployments/${encodeURIComponent(this.deploymentId)}/${path}`;
     const response = await fetch(url, {
+      signal: AbortSignal.timeout(this.timeoutMs),
       method: 'POST',
       headers: {
         Authorization: `Bearer ${this.token}`,
@@ -73,7 +97,7 @@ export class CloudApi {
   }
 
   async start(nonce: string): Promise<StartResponse> {
-    return (await (await this.post('start', { nonce })).json()) as StartResponse;
+    return (await this.post('start', { nonce }, true)) as StartResponse;
   }
 
   async logs(payload: LogsPayload): Promise<void> {

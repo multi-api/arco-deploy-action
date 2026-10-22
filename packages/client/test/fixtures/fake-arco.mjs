@@ -5,6 +5,7 @@
 //   FAKE_ARCO_ENVDUMP  = file to write the child's environment (JSON) to
 //   FAKE_ARCO_INFO     = ok (default) | bad | fail
 //   FAKE_ARCO_CALLS    = file to append each invocation's argv to
+//   FAKE_ARCO_VERSION  = hang: `--version` blocks until killed
 import { appendFileSync, writeFileSync } from 'node:fs';
 
 const args = process.argv.slice(2);
@@ -16,6 +17,10 @@ const at = '2026-10-21T12:00:00Z';
 const emit = (o) => console.log(JSON.stringify({ schema: 1, at, ...o }));
 
 if (args[0] === '--version') {
+  if (process.env.FAKE_ARCO_VERSION === 'hang') {
+    setInterval(() => {}, 1000);
+    await new Promise(() => {});
+  }
   console.log('Arco 0.10.0');
 } else if (args[0] === 'deploy' && scenario === 'opterror') {
   console.error('The "--bogus" option does not exist.');

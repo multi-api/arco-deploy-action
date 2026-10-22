@@ -24,11 +24,16 @@ Cloud generates the workflow file for you; you normally never write this by hand
 Inputs: `token`, `api-url`, `environment`, `deployment_id`, `nonce` (required); `mode` (`deploy` | `inventory`,
 default `deploy`); `working-directory` (default `.`).
 
-Requires Arco >= 0.10 (`--json` output). All Arco output parsing lives in `src/arco.ts`.
+Requires Arco >= 0.10 (`--json` output). All Arco output parsing lives in `packages/client/src/arco.ts`.
 
 ## Development
 
 ```
-npm test          # vitest, uses test/fixtures/fake-arco.mjs
-npm run build     # ncc bundle into dist/ (commit it)
+npm install       # links the workspaces
+npm test          # vitest in both workspaces; uses packages/client/test/fixtures/fake-arco.mjs
+npm run typecheck
+npm run build     # builds packages/client, then ncc bundles the action into dist/ (commit it)
 ```
+
+The Cloud protocol client (API, log batching, deploy session) lives in `packages/client` and is published as
+`@multiapi/arco-cloud-client`; the action in `src/` is a thin composition of it.

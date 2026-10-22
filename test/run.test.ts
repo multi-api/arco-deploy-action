@@ -19,7 +19,7 @@ let logsAnswer: { status: number; body: unknown } | null;
 function setupProject(): string {
   const dir = mkdtempSync(join(tmpdir(), 'arco-proj-'));
   mkdirSync(join(dir, 'vendor/bin'), { recursive: true });
-  const fake = resolve(__dirname, 'fixtures/fake-arco.mjs');
+  const fake = resolve(__dirname, '../packages/client/test/fixtures/fake-arco.mjs');
   writeFileSync(join(dir, 'vendor/bin/arco'), `#!/bin/sh\nexec node "${fake}" "$@"\n`);
   chmodSync(join(dir, 'vendor/bin/arco'), 0o755);
   return dir;
