@@ -36,4 +36,4 @@ npm run build     # builds packages/client, then ncc bundles the action into dis
 ```
 
 The Cloud protocol client (API, log batching, deploy session) lives in `packages/client` and is published as
-`@multi-api/arco-cloud-client`; the action in `src/` is a thin composition of it.
+`@multiapi/arco-cloud-client`; the action in `src/` is a thin composition of it.

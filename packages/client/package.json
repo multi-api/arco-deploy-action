@@ -1,5 +1,5 @@
 {
-  "name": "@multi-api/arco-cloud-client",
+  "name": "@multiapi/arco-cloud-client",
   "version": "0.1.1",
   "description": "Arco Cloud runner protocol client: start/logs/finish API, log batching and the Arco deploy session",
   "type": "module",

@@ -1,4 +1,4 @@
-import { CloudApi, RunAbortedError, deployAndFinish, startRun } from '@multi-api/arco-cloud-client';
+import { CloudApi, RunAbortedError, deployAndFinish, startRun } from '@multiapi/arco-cloud-client';
 
 export interface RunOptions {
   token: string;

@@ -11,7 +11,7 @@
       "node"
     ],
     "paths": {
-      "@multi-api/arco-cloud-client": [
+      "@multiapi/arco-cloud-client": [
         "./packages/client/src/index.ts"
       ]
     }
