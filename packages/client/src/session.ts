@@ -1,4 +1,5 @@
 import { CloudApi, isRunLost, type StartResponse } from './api.js';
+import { Redactor } from './redactor.js';
 import { Batcher, type BatcherOptions } from './batcher.js';
 import {
   deployArgs,
@@ -59,6 +60,8 @@ export interface StartRunOptions {
   /** Extra redaction applied after the built-in secret redaction. */
   redact?: (text: string) => string;
   extraSecrets?: string[];
+  /** Shared redactor; the token, nonce and credentials are added to it. A new one is created when omitted. */
+  redactor?: Redactor;
   warn?: (message: string) => void;
   batcher?: Partial<BatcherOptions>;
 }
@@ -85,10 +88,11 @@ export async function startRun(o: StartRunOptions): Promise<RunSession> {
   const started = await o.api.start(o.nonce);
   const { credentials, region } = started;
 
-  const secrets = [credentials.accessKeyId, credentials.secretAccessKey, credentials.sessionToken, o.token, o.nonce, ...(o.extraSecrets ?? [])].filter(
-    (s) => typeof s === 'string' && s.length >= 4,
-  );
-  const redactSecrets = (text: string) => secrets.reduce((t, s) => t.split(s).join('***'), text);
+  const redactor = o.redactor ?? new Redactor();
+  for (const secret of [credentials.accessKeyId, credentials.secretAccessKey, credentials.sessionToken, o.token, o.nonce, ...(o.extraSecrets ?? [])]) {
+    redactor.add(secret);
+  }
+  const redactSecrets = (text: string) => redactor.redact(text);
   const redact = o.redact ? (text: string) => o.redact!(redactSecrets(text)) : redactSecrets;
 
   const controller = new AbortController();
@@ -108,7 +112,7 @@ export async function startRun(o: StartRunOptions): Promise<RunSession> {
   return {
     api: o.api,
     started,
-    secrets,
+    secrets: [...redactor.secrets],
     redact,
     batcher,
     signal: controller.signal,

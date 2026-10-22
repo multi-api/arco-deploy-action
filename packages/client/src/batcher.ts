@@ -8,6 +8,8 @@ export interface BatcherOptions {
   backoffMs?: (attempt: number) => number;
   sleep?: (ms: number) => Promise<void>;
   redact?: (text: string) => string;
+  /** When set, an empty batch is queued after this long without any batch, so the lease stays alive. */
+  keepAliveMs?: number;
   onError?: (message: string) => void;
   /** When true for a send error, delivery stops for good (no retry, later batches are discarded) and onAbort runs once. */
   isFatal?: (error: unknown) => boolean;
@@ -20,9 +22,11 @@ export class Batcher {
   private events: unknown[] = [];
   private seq = 0;
   private timer: NodeJS.Timeout | null = null;
+  private keepAliveTimer: NodeJS.Timeout | null = null;
+  private closed = false;
   private aborted = false;
   private chain: Promise<void> = Promise.resolve();
-  private readonly o: Required<Omit<BatcherOptions, 'onError' | 'isFatal' | 'onAbort'>> & Pick<BatcherOptions, 'onError' | 'isFatal' | 'onAbort'>;
+  private readonly o: Required<Omit<BatcherOptions, 'onError' | 'isFatal' | 'onAbort' | 'keepAliveMs'>> & Pick<BatcherOptions, 'onError' | 'isFatal' | 'onAbort' | 'keepAliveMs'>;
 
   constructor(options: BatcherOptions) {
     this.o = {
@@ -34,6 +38,7 @@ export class Batcher {
       redact: (t) => t,
       ...options,
     };
+    this.armKeepAlive();
   }
 
   addLine(line: string): void {
@@ -66,9 +71,41 @@ export class Batcher {
       const payload: LogsPayload = { seq: ++this.seq, lines: this.lines, events: this.events };
       this.lines = [];
       this.events = [];
-      this.chain = this.chain.then(() => this.deliver(payload));
+      this.enqueue(payload);
     }
     return this.chain;
+  }
+
+  /** Flushes what is pending and stops every timer. */
+  async close(): Promise<void> {
+    this.closed = true;
+    if (this.keepAliveTimer) {
+      clearTimeout(this.keepAliveTimer);
+      this.keepAliveTimer = null;
+    }
+    await this.flush();
+  }
+
+  private enqueue(payload: LogsPayload): void {
+    this.chain = this.chain.then(() => this.deliver(payload));
+    this.armKeepAlive();
+  }
+
+  private armKeepAlive(): void {
+    if (this.keepAliveTimer) clearTimeout(this.keepAliveTimer);
+    this.keepAliveTimer = null;
+    const ms = this.o.keepAliveMs;
+    if (!ms || this.closed || this.aborted) return;
+    this.keepAliveTimer = setTimeout(() => {
+      this.keepAliveTimer = null;
+      // Fold anything pending into the keep-alive batch rather than sending an empty one next to it.
+      if (this.timer) {
+        this.flush();
+      } else {
+        this.enqueue({ seq: ++this.seq, lines: [], events: [] });
+      }
+    }, ms);
+    this.keepAliveTimer.unref();
   }
 
   private async deliver(payload: LogsPayload): Promise<void> {
@@ -86,6 +123,10 @@ export class Batcher {
           if (this.timer) {
             clearTimeout(this.timer);
             this.timer = null;
+          }
+          if (this.keepAliveTimer) {
+            clearTimeout(this.keepAliveTimer);
+            this.keepAliveTimer = null;
           }
           this.o.onAbort?.(e);
           return;
