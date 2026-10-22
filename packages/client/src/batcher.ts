@@ -1,4 +1,5 @@
 import type { LogsPayload } from './api.js';
+import { redactValue } from './redactor.js';
 
 export interface BatcherOptions {
   send: (payload: LogsPayload) => Promise<void>;
@@ -49,7 +50,7 @@ export class Batcher {
 
   addEvent(event: unknown): void {
     if (this.aborted) return;
-    this.events.push(JSON.parse(this.o.redact(JSON.stringify(event))));
+    this.events.push(redactValue(event, this.o.redact));
     this.afterAdd();
   }
 

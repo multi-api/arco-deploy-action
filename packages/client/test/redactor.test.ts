@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Redactor, secretVariants } from '../src/redactor.js';
+import { Redactor, redactValue, secretVariants } from '../src/redactor.js';
 
 const secret = 's3cr3t+/=value';
 const b64 = Buffer.from(secret).toString('base64');
@@ -63,5 +63,16 @@ describe('secretVariants', () => {
     expect(new Set(v).size).toBe(v.length);
     expect(v.every((s) => s.length >= 4)).toBe(true);
     expect(v).toContain('abcd');
+  });
+});
+
+describe('redactValue', () => {
+  it('redacts string leaves and object keys, leaving numbers, booleans and null untouched', () => {
+    const r = new Redactor();
+    for (const s of ['true', '2525', 'failed']) r.add(s);
+    const value = { ok: true, no: false, none: null, elapsed_ms: 12525, msg: 'true: 2525 failed', list: ['failed', 2525, { true: 'x' }] };
+    expect(redactValue(value, (t) => r.redact(t))).toEqual({
+      ok: true, no: false, none: null, elapsed_ms: 12525, msg: '***: *** ***', list: ['***', 2525, { '***': 'x' }],
+    });
   });
 });

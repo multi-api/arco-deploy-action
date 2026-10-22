@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Batcher } from '../src/batcher.js';
+import { Redactor } from '../src/redactor.js';
 
 describe('Batcher', () => {
   afterEach(() => {
@@ -61,5 +62,17 @@ describe('Batcher', () => {
     }
     expect(send.mock.calls.every((c: any) => c[0].lines.length === 1)).toBe(true);
     await b.close();
+  });
+
+  it('redacts events without breaking them when a secret equals a JSON literal or digits of a number', async () => {
+    const r = new Redactor();
+    for (const s of ['true', '2525', 'failed', 'null']) r.add(s);
+    const send = vi.fn(async () => {});
+    const b = new Batcher({ send, redact: (t) => r.redact(t) });
+    expect(() => b.addEvent({ schema: 1, type: 'step', ok: true, elapsed_ms: 12525, error: null, message: 'true that 2525 failed' })).not.toThrow();
+    await b.flush();
+    expect((send.mock.calls[0] as any)[0].events).toEqual([
+      { schema: 1, type: 'step', ok: true, elapsed_ms: 12525, error: null, message: '*** that *** ***' },
+    ]);
   });
 });

@@ -1,5 +1,5 @@
 import { CloudApi, isRunLost, type StartResponse } from './api.js';
-import { Redactor } from './redactor.js';
+import { Redactor, redactValue } from './redactor.js';
 import { Batcher, type BatcherOptions } from './batcher.js';
 import {
   deployArgs,
@@ -191,7 +191,7 @@ export async function deployAndFinish(s: RunSession, o: DeployOptions): Promise<
   if (inventory === null) s.batcher.addLine('Could not collect the resource inventory.');
 
   let arcoVersion: string | null = null;
-  const version = await runArco(versionArgs(), { ...common, env: childEnv });
+  const version = await runArco(versionArgs(), { ...common, env: childEnv, signal: s.signal, killGraceMs: o.killGraceMs });
   if (version.exitCode === 0) arcoVersion = parseVersion(version.stdout);
 
   await s.batcher.flush();
@@ -204,8 +204,9 @@ export async function deployAndFinish(s: RunSession, o: DeployOptions): Promise<
         ? { result: 'succeeded', revision: null, rolled_back: false, error_code: null, error_message: null, arco_version: arcoVersion, inventory }
         : // inventory mode exists only to obtain the inventory: without it the request failed
           { result: 'failed', revision: null, rolled_back: false, error_code: 'arco.inventory_failed', error_message: 'Could not collect the resource inventory', arco_version: arcoVersion };
-  // Arco's messages and inventory are untrusted text: redact like every other outbound string.
-  const payload = JSON.parse(s.redact(JSON.stringify(rawPayload))) as FinishPayload;
+  // Arco's messages and inventory are untrusted text: redact like every other outbound string. `result` is our own
+  // enum, never secret material, so it is kept even when a secret happens to equal "failed" or "succeeded".
+  const payload: FinishPayload = { ...redactValue(rawPayload, s.redact), result: rawPayload.result };
 
   await finishWithRetry(s.api, payload, s.sleep, s.warn);
 

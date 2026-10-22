@@ -40,3 +40,18 @@ export class Redactor {
     return this.added;
   }
 }
+
+/**
+ * Applies `redact` to every string leaf and object key of a JSON-like value; numbers, booleans and null are kept as is.
+ * Redacting the serialized JSON instead would corrupt it when a secret equals a literal (`true`, `null`) or digits of a number.
+ */
+export function redactValue<T>(value: T, redact: (text: string) => string): T {
+  if (typeof value === 'string') return redact(value) as T;
+  if (Array.isArray(value)) return value.map((item) => redactValue(item, redact)) as T;
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) out[redact(key)] = redactValue(item, redact);
+    return out as T;
+  }
+  return value;
+}

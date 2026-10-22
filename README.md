@@ -24,7 +24,7 @@ Cloud generates the workflow file for you; you normally never write this by hand
 Inputs: `token`, `api-url`, `environment`, `deployment_id`, `nonce` (required); `mode` (`deploy` | `inventory`,
 default `deploy`); `working-directory` (default `.`).
 
-Requires Arco >= 0.10 (`--json` output). All Arco output parsing lives in `src/arco.ts`.
+Requires Arco >= 0.10 (`--json` output). All Arco output parsing lives in `packages/client/src/arco.ts`.
 
 ## Development
 
