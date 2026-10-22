@@ -18,6 +18,15 @@
     "node": ">=20"
   },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/multi-api/arco-deploy-action.git",
+    "directory": "packages/client"
+  },
+  "homepage": "https://github.com/multi-api/arco-deploy-action/tree/main/packages/client#readme",
+  "bugs": {
+    "url": "https://github.com/multi-api/arco-deploy-action/issues"
+  },
   "publishConfig": {
     "access": "public",
     "provenance": true

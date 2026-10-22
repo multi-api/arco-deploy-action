@@ -1,7 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Batcher } from '../src/batcher.js';
 
 describe('Batcher', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('flushes on the interval', async () => {
     vi.useFakeTimers();
     const send = vi.fn(async () => {});
@@ -10,7 +14,6 @@ describe('Batcher', () => {
     expect(send).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(2000);
     expect(send).toHaveBeenCalledWith({ seq: 1, lines: ['a'], events: [] });
-    vi.useRealTimers();
   });
 
   it('flushes at 200 lines', async () => {
@@ -46,7 +49,6 @@ describe('Batcher', () => {
     await b.close();
     await vi.advanceTimersByTimeAsync(300000);
     expect(send).toHaveBeenCalledTimes(2);
-    vi.useRealTimers();
   });
 
   it('does not send keep-alive while real batches keep going out', async () => {
@@ -59,6 +61,5 @@ describe('Batcher', () => {
     }
     expect(send.mock.calls.every((c: any) => c[0].lines.length === 1)).toBe(true);
     await b.close();
-    vi.useRealTimers();
   });
 });
