@@ -176,3 +176,67 @@ describe('buildFailure', () => {
     });
   });
 });
+
+describe('finishWithRetry when Cloud refuses the report', () => {
+  function cloud(statuses: number[]) {
+    const bodies: any[] = [];
+    vi.stubGlobal('fetch', async (_url: string, init: any) => {
+      bodies.push(JSON.parse(init.body));
+      const status = statuses.shift() ?? 204;
+      return new Response(status === 204 ? null : JSON.stringify({ message: 'invalid' }), { status });
+    });
+    return { api: new CloudApi('https://cloud.test', 'tok', 'dep_1'), bodies };
+  }
+
+  const succeeded = {
+    result: 'succeeded', revision: 'rev-1', rolled_back: false, error_code: null, error_message: null, arco_version: '0.11.4',
+    url: 'https://x.lambda-web.us-east-1.on.aws', domains: ['shop.example.com'], cold_start_ms: 900, inventory: { resources: [] },
+  };
+
+  it('sends the result again once without the optional fields, without sleeping', async () => {
+    const { api, bodies } = cloud([422, 204]);
+    const warnings: string[] = [];
+    const sleeps: number[] = [];
+
+    await finishWithRetry(api, succeeded, async (ms) => void sleeps.push(ms), (m) => warnings.push(m));
+
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).toEqual({ result: 'succeeded', revision: 'rev-1', rolled_back: false, error_code: null, error_message: null, arco_version: '0.11.4' });
+    expect(sleeps).toEqual([]);
+    expect(warnings[0]).toMatch(/without url, domains, cold start and inventory/);
+  });
+
+  it('reports an explicit failure when the stripped result is refused too', async () => {
+    const { api, bodies } = cloud([422, 422, 204]);
+    const warnings: string[] = [];
+
+    await finishWithRetry(api, succeeded, async () => {}, (m) => warnings.push(m));
+
+    expect(bodies).toHaveLength(3);
+    expect(bodies[2]).toMatchObject({ result: 'failed', error_code: 'cloud.finish_rejected' });
+    expect(bodies[2].error_message).toMatch(/refused the deploy result/);
+    expect(warnings[1]).toMatch(/reporting the deployment as failed/);
+  });
+
+  it('goes straight to the failure report when there were no optional fields, and stops if that is refused', async () => {
+    const { api, bodies } = cloud([400, 400]);
+    const warnings: string[] = [];
+
+    await finishWithRetry(api, { result: 'failed', revision: null, rolled_back: false, error_code: 'x', error_message: 'y', arco_version: null }, async () => {}, (m) => warnings.push(m));
+
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).toMatchObject({ error_code: 'cloud.finish_rejected' });
+    expect(warnings.at(-1)).toMatch(/refused the failure report too/);
+  });
+
+  it('still retries 429 and 5xx with backoff', async () => {
+    const { api, bodies } = cloud([429, 503, 204]);
+    const sleeps: number[] = [];
+
+    await finishWithRetry(api, succeeded, async (ms) => void sleeps.push(ms));
+
+    expect(bodies).toHaveLength(3);
+    expect(bodies[2]).toEqual(succeeded);
+    expect(sleeps).toEqual([500, 1000]);
+  });
+});

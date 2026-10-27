@@ -1,4 +1,4 @@
-import { CloudApi, isRunLost, type StartResponse } from './api.js';
+import { CloudApi, CloudApiError, isRunLost, type StartResponse } from './api.js';
 import { Redactor, redactValue } from './redactor.js';
 import { Batcher, type BatcherOptions } from './batcher.js';
 import {
@@ -28,19 +28,54 @@ export function buildFailure(code: string, message: string): FinishPayload {
   return { result: 'failed', revision: null, rolled_back: false, error_code: code, error_message: message, arco_version: null };
 }
 
+/** Cloud refused the request itself (validation and the like): sending it again cannot help. */
+function isRefused(e: unknown): e is CloudApiError {
+  return e instanceof CloudApiError && e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429 && !isRunLost(e);
+}
+
+/** The optional fields a Cloud may refuse; the result itself never depends on them. */
+const OPTIONAL_FIELDS = ['url', 'domains', 'cold_start_ms', 'inventory'] as const;
+
+/**
+ * Reports the result, retrying network errors and 5xx. A refused report (4xx) is not sent again
+ * as is: first once without its optional fields, then as an explicit failure, so the deployment
+ * never stays open waiting for a result Cloud will not accept.
+ */
 export async function finishWithRetry(
   api: CloudApi,
   payload: unknown,
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
   warn: (m: string) => void = () => {},
 ): Promise<void> {
+  let current = payload;
+  let fallback: 'stripped' | 'failure' | null = null;
+
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      await api.finish(payload);
+      await api.finish(current);
       return;
     } catch (e) {
       if (isRunLost(e)) {
         warn(`Arco Cloud rejected the result: ${e.message}`);
+        return;
+      }
+      if (isRefused(e)) {
+        const record = typeof current === 'object' && current !== null ? (current as Record<string, unknown>) : {};
+        if (fallback === null && OPTIONAL_FIELDS.some((f) => f in record)) {
+          warn(`Arco Cloud refused the result (${e.message}); sending it again without url, domains, cold start and inventory`);
+          current = Object.fromEntries(Object.entries(record).filter(([k]) => !(OPTIONAL_FIELDS as readonly string[]).includes(k)));
+          fallback = 'stripped';
+          attempt = -1;
+          continue;
+        }
+        if (fallback !== 'failure') {
+          warn(`Arco Cloud refused the result (${e.message}); reporting the deployment as failed`);
+          current = buildFailure('cloud.finish_rejected', `Arco Cloud refused the deploy result: ${e.message}`);
+          fallback = 'failure';
+          attempt = -1;
+          continue;
+        }
+        warn(`Arco Cloud refused the failure report too: ${e.message}`);
         return;
       }
       if (attempt === 3) {
