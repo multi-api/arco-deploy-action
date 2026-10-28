@@ -33,7 +33,7 @@ export interface FinishPayload {
 
 // --json never prompts: a dispatch from Cloud is already user-confirmed, so always pass --yes
 // (otherwise a first deploy of an environment is `refused` with deploy.confirm_required).
-export const deployArgs = (environment: string): string[] => ['deploy', `--env=${environment}`, '--yes', '--json'];
+export const deployArgs = (environment: string, extra: string[] = []): string[] => ['deploy', `--env=${environment}`, '--yes', '--json', ...extra];
 export const infoArgs = (environment: string): string[] => ['info', `--env=${environment}`, '--resources', '--json'];
 export const versionArgs = (): string[] => ['--version'];
 

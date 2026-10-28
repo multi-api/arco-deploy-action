@@ -6,7 +6,8 @@
 //   FAKE_ARCO_INFO     = ok (default) | bad | fail
 //   FAKE_ARCO_CALLS    = file to append each invocation's argv to
 //   FAKE_ARCO_VERSION  = hang: `--version` blocks until killed
-import { appendFileSync, writeFileSync } from 'node:fs';
+//   FAKE_ARCO_LEAK_DNS = set: deploy prints the shared credentials file and CLOUDFLARE_API_TOKEN
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 
 const args = process.argv.slice(2);
 if (process.env.FAKE_ARCO_CALLS) appendFileSync(process.env.FAKE_ARCO_CALLS, args.join(' ') + '\n');
@@ -30,6 +31,10 @@ if (args[0] === '--version') {
   if (scenario === 'stubborn') process.on('SIGTERM', () => {});
   if (scenario === 'hang' || scenario === 'stubborn') appendFileSync(process.env.FAKE_ARCO_CALLS, `pid ${process.pid}\n`);
   console.log('plain line before events');
+  if (process.env.FAKE_ARCO_LEAK_DNS) {
+    console.log(readFileSync(process.env.AWS_SHARED_CREDENTIALS_FILE, 'utf8'));
+    console.log(`cloudflare=${process.env.CLOUDFLARE_API_TOKEN}`);
+  }
   emit({ type: 'step', key: 'deploy.build', status: 'started', params: {} });
   // A leaky tool printing its environment: Cloud must never receive this.
   console.log(`debug AWS_SECRET_ACCESS_KEY=${process.env.AWS_SECRET_ACCESS_KEY} region=${process.env.AWS_REGION}`);
