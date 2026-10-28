@@ -1,4 +1,4 @@
-import { CloudApi, CloudApiError, isRunLost, type StartResponse } from './api.js';
+import { CloudApi, CloudApiError, isRunLost, type Credentials, type StartResponse } from './api.js';
 import { Redactor, redactValue } from './redactor.js';
 import { Batcher, type BatcherOptions } from './batcher.js';
 import { parseExternalDns, withExternalDns, type ExternalDns } from './dns.js';
@@ -122,12 +122,35 @@ export interface RunSession {
   sleep?: (ms: number) => Promise<void>;
 }
 
+/** The fields of the start answer the run cannot go on without; anything of the wrong shape throws. */
+function parseStartAnswer(started: unknown) {
+  const { dns, cloudflareToken } = parseExternalDns(started);
+  const { credentials, region } = started as Record<string, unknown>;
+  const malformed = (field: string) => new Error(`Arco Cloud start answer was malformed (${field})`);
+  if (credentials === null || typeof credentials !== 'object' || Array.isArray(credentials)) throw malformed('credentials');
+  const c = credentials as Record<string, unknown>;
+  for (const key of ['accessKeyId', 'secretAccessKey', 'sessionToken']) {
+    if (typeof c[key] !== 'string' || c[key] === '') throw malformed(`credentials.${key}`);
+  }
+  if (typeof region !== 'string' || region === '') throw malformed('region');
+  return { credentials: credentials as Credentials, region, dns, cloudflareToken };
+}
+
 /** Calls start, derives the secrets and redaction, and wires a log batcher that aborts the run when Cloud revokes it. */
 export async function startRun(o: StartRunOptions): Promise<RunSession> {
   const warn = o.warn ?? (() => {});
   const started = await o.api.start(o.nonce);
-  const { credentials, region } = started;
-  const { dns, cloudflareToken } = parseExternalDns(started);
+  let parsed: ReturnType<typeof parseStartAnswer>;
+  try {
+    parsed = parseStartAnswer(started);
+  } catch (e) {
+    // Nothing ran yet: report the failure now rather than leave the run open until Cloud sweeps it as heartbeat_lost.
+    // The message names fields only, never values, so it carries no secret.
+    const message = e instanceof Error ? e.message : String(e);
+    await finishWithRetry(o.api, buildFailure('cloud.start_answer_invalid', message), o.batcher?.sleep, warn);
+    throw e;
+  }
+  const { credentials, region, dns, cloudflareToken } = parsed;
 
   const redactor = o.redactor ?? new Redactor();
   const dnsSecrets = dns ? [dns.credentials.accessKeyId, dns.credentials.secretAccessKey, dns.credentials.sessionToken] : [];
