@@ -72,13 +72,14 @@ export async function withExternalDns(
   args: string[],
   x: ExternalDnsAnswer,
   dir?: string,
-  owner: { uid?: number; gid?: number } = {},
+  owner: { uid?: number | null; gid?: number | null } | null = {},
 ): Promise<ExternalDnsChild> {
   const outEnv: NodeJS.ProcessEnv = { ...env };
   const outArgs = [...args];
   let cleanup = async () => {};
 
-  if (x.dns !== null) {
+  // `!= null` throughout: a JavaScript caller may leave fields undefined.
+  if (x.dns != null) {
     const tmp = await mkdtemp(join(dir ?? tmpdir(), 'arco-dns-'));
     cleanup = () => rm(tmp, { recursive: true, force: true });
     try {
@@ -90,9 +91,9 @@ export async function withExternalDns(
         { mode: 0o600 },
       );
       await chmod(file, 0o600);
-      if (owner.uid !== undefined || owner.gid !== undefined) {
-        const uid = owner.uid ?? -1;
-        const gid = owner.gid ?? -1;
+      if (owner?.uid != null || owner?.gid != null) {
+        const uid = owner?.uid ?? -1;
+        const gid = owner?.gid ?? -1;
         await chown(tmp, uid, gid);
         await chown(file, uid, gid);
       }
@@ -103,7 +104,7 @@ export async function withExternalDns(
       throw e;
     }
   }
-  if (x.cloudflareToken !== null) outEnv.CLOUDFLARE_API_TOKEN = x.cloudflareToken;
+  if (x.cloudflareToken != null) outEnv.CLOUDFLARE_API_TOKEN = x.cloudflareToken;
 
   return { env: outEnv, args: outArgs, cleanup };
 }

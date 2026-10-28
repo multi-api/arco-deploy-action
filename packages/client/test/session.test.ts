@@ -125,6 +125,33 @@ describe('external DNS', () => {
     expect(existsSync(deployEnv.AWS_SHARED_CREDENTIALS_FILE)).toBe(false);
   });
 
+  it('finishes the run as dns.credentials_file_failed when the file cannot be written, without running arco', async () => {
+    const callsFile = join(project, 'calls.txt');
+    const s = await session();
+    const code = await deployAndFinish(s, {
+      ...dep('deploy', { ...process.env, FAKE_ARCO_CALLS: callsFile }),
+      dnsDir: join(project, 'does-not-exist'),
+    });
+    expect(code).toBe(1);
+    expect(existsSync(callsFile)).toBe(false);
+    const finish = calls.at(-1)!;
+    expect(finish.path).toBe('finish');
+    expect(finish.body).toMatchObject({ result: 'failed', error_code: 'dns.credentials_file_failed', rolled_back: false, revision: null });
+    expect(finish.body.error_message).toMatch(/^Could not write the DNS credentials file: ENOENT/);
+    const lines = calls.filter((c) => c.path === 'logs').flatMap((c) => c.body.lines).join('\n');
+    expect(lines).toContain('Could not write the DNS credentials file');
+  });
+
+  it('redacts secrets from the dns.credentials_file_failed message', async () => {
+    const s = await session();
+    const code = await deployAndFinish(s, { ...dep('deploy', { ...process.env }), dnsDir: join(project, CF) });
+    expect(code).toBe(1);
+    const finish = calls.at(-1)!;
+    expect(finish.body.error_code).toBe('dns.credentials_file_failed');
+    expect(finish.body.error_message).not.toContain(CF);
+    expect(finish.body.error_message).toContain('***');
+  });
+
   it('removes the file when arco exits non-zero', async () => {
     const dump = join(project, 'env.json');
     const s = await session();

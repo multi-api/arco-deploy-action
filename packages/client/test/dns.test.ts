@@ -2,6 +2,13 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'no
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, writeFile: vi.fn(actual.writeFile) };
+});
+
+import { writeFile } from 'node:fs/promises';
 import { CloudApi, parseExternalDns, withExternalDns, type ExternalDns } from '../src/index.js';
 
 const DNS: ExternalDns = {
@@ -90,6 +97,26 @@ describe('withExternalDns', () => {
     expect(env).toEqual({ PATH: '/bin' });
     expect(args).toEqual(['deploy']);
     await r.cleanup();
+  });
+
+  it('removes the temporary directory and rethrows when the write fails', async () => {
+    vi.mocked(writeFile).mockRejectedValueOnce(Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }));
+    await expect(withExternalDns({ PATH: '/bin' }, ['deploy'], { dns: DNS, cloudflareToken: null }, dir)).rejects.toThrow(/ENOSPC/);
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it('treats undefined fields from a JavaScript caller as absent', async () => {
+    const x = {} as unknown as Parameters<typeof withExternalDns>[2];
+    const r = await withExternalDns({ PATH: '/bin' }, ['deploy'], x, dir, undefined);
+    expect(r.env).toEqual({ PATH: '/bin' });
+    expect(r.args).toEqual(['deploy']);
+    expect(readdirSync(dir)).toEqual([]);
+
+    const owner = { uid: undefined, gid: null } as unknown as { uid?: number; gid?: number };
+    const withFile = await withExternalDns({ PATH: '/bin' }, ['deploy'], { dns: DNS, cloudflareToken: undefined } as unknown as Parameters<typeof withExternalDns>[2], dir, owner);
+    expect(withFile.env).not.toHaveProperty('CLOUDFLARE_API_TOKEN');
+    expect(withFile.args).toEqual(['deploy', '--dns-profile=arco-cloud-dns']);
+    await withFile.cleanup();
   });
 });
 

@@ -192,6 +192,8 @@ export interface DeployOptions {
   gid?: number;
   /** Grace between SIGTERM and SIGKILL when Cloud revokes the run. Default 5000. */
   killGraceMs?: number;
+  /** Where the DNS credentials file's temporary directory is created. Default: the OS temporary directory. */
+  dnsDir?: string;
 }
 
 /** deploy -> info -> version -> finish. Returns the process exit code to mirror (0 = success). */
@@ -213,7 +215,17 @@ export async function deployAndFinish(s: RunSession, o: DeployOptions): Promise<
   if (o.mode === 'deploy') {
     // Only the deploy child gets the DNS profile file, --dns-profile and CLOUDFLARE_API_TOKEN; the file is removed
     // however arco ends (success, non-zero exit, or stopped because Cloud revoked the run).
-    const dns = await withExternalDns(deployEnv, [], s, undefined, { uid: o.uid, gid: o.gid });
+    let dns: Awaited<ReturnType<typeof withExternalDns>>;
+    try {
+      dns = await withExternalDns(deployEnv, [], s, o.dnsDir, { uid: o.uid, gid: o.gid });
+    } catch (e) {
+      // Nothing ran yet: report the failure now rather than leave the run open until Cloud sweeps it.
+      const message = s.redact(`Could not write the DNS credentials file: ${e instanceof Error ? e.message : String(e)}`);
+      s.batcher.addLine(message);
+      await s.batcher.flush();
+      await finishWithRetry(s.api, buildFailure('dns.credentials_file_failed', message), s.sleep, s.warn);
+      return 1;
+    }
     try {
       const deploy = await runArco(deployArgs(o.environment, dns.args), {
         ...common,
