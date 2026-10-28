@@ -1,6 +1,7 @@
 import { CloudApi, CloudApiError, isRunLost, type StartResponse } from './api.js';
 import { Redactor, redactValue } from './redactor.js';
 import { Batcher, type BatcherOptions } from './batcher.js';
+import { parseExternalDns, withExternalDns, type ExternalDns } from './dns.js';
 import {
   deployArgs,
   infoArgs,
@@ -104,7 +105,11 @@ export interface StartRunOptions {
 export interface RunSession {
   api: CloudApi;
   started: StartResponse;
-  /** Every value that must never leave the machine: AWS credentials, token, nonce and extras. */
+  /** Route 53 credentials for the deploy child (`--dns-profile`); null when Cloud sent none. */
+  dns: ExternalDns | null;
+  /** CLOUDFLARE_API_TOKEN for the deploy child; null when Cloud sent none. */
+  cloudflareToken: string | null;
+  /** Every value that must never leave the machine: AWS and DNS credentials, Cloudflare token, Cloud token, nonce and extras. */
   secrets: string[];
   redact: (text: string) => string;
   batcher: Batcher;
@@ -122,9 +127,20 @@ export async function startRun(o: StartRunOptions): Promise<RunSession> {
   const warn = o.warn ?? (() => {});
   const started = await o.api.start(o.nonce);
   const { credentials, region } = started;
+  const { dns, cloudflareToken } = parseExternalDns(started);
 
   const redactor = o.redactor ?? new Redactor();
-  for (const secret of [credentials.accessKeyId, credentials.secretAccessKey, credentials.sessionToken, o.token, o.nonce, ...(o.extraSecrets ?? [])]) {
+  const dnsSecrets = dns ? [dns.credentials.accessKeyId, dns.credentials.secretAccessKey, dns.credentials.sessionToken] : [];
+  for (const secret of [
+    credentials.accessKeyId,
+    credentials.secretAccessKey,
+    credentials.sessionToken,
+    ...dnsSecrets,
+    ...(cloudflareToken !== null ? [cloudflareToken] : []),
+    o.token,
+    o.nonce,
+    ...(o.extraSecrets ?? []),
+  ]) {
     redactor.add(secret);
   }
   const redactSecrets = (text: string) => redactor.redact(text);
@@ -147,6 +163,8 @@ export async function startRun(o: StartRunOptions): Promise<RunSession> {
   return {
     api: o.api,
     started,
+    dns,
+    cloudflareToken,
     secrets: [...redactor.secrets],
     redact,
     batcher,
@@ -174,6 +192,8 @@ export interface DeployOptions {
   gid?: number;
   /** Grace between SIGTERM and SIGKILL when Cloud revokes the run. Default 5000. */
   killGraceMs?: number;
+  /** Where the DNS credentials file's temporary directory is created. Default: the OS temporary directory. */
+  dnsDir?: string;
 }
 
 /** deploy -> info -> version -> finish. Returns the process exit code to mirror (0 = success). */
@@ -193,23 +213,40 @@ export async function deployAndFinish(s: RunSession, o: DeployOptions): Promise<
   let result: ArcoResult | null = null;
 
   if (o.mode === 'deploy') {
-    const deploy = await runArco(deployArgs(o.environment), {
-      ...common,
-      env: deployEnv,
-      signal: s.signal,
-      killGraceMs: o.killGraceMs,
-      onStdoutLine: (line) => {
-        const event = parseEventLine(line);
-        if (event) {
-          s.batcher.addEvent(event);
-          if (isResult(event)) result = event;
-        } else {
-          s.batcher.addLine(line);
-        }
-      },
-      onStderrLine: (line) => s.batcher.addLine(line),
-    });
-    exitCode = deploy.exitCode;
+    // Only the deploy child gets the DNS profile file, --dns-profile and CLOUDFLARE_API_TOKEN; the file is removed
+    // however arco ends (success, non-zero exit, or stopped because Cloud revoked the run).
+    let dns: Awaited<ReturnType<typeof withExternalDns>>;
+    try {
+      dns = await withExternalDns(deployEnv, [], s, o.dnsDir, { uid: o.uid, gid: o.gid });
+    } catch (e) {
+      // Nothing ran yet: report the failure now rather than leave the run open until Cloud sweeps it.
+      const message = s.redact(`Could not write the DNS credentials file: ${e instanceof Error ? e.message : String(e)}`);
+      s.batcher.addLine(message);
+      await s.batcher.flush();
+      await finishWithRetry(s.api, buildFailure('dns.credentials_file_failed', message), s.sleep, s.warn);
+      return 1;
+    }
+    try {
+      const deploy = await runArco(deployArgs(o.environment, dns.args), {
+        ...common,
+        env: dns.env,
+        signal: s.signal,
+        killGraceMs: o.killGraceMs,
+        onStdoutLine: (line) => {
+          const event = parseEventLine(line);
+          if (event) {
+            s.batcher.addEvent(event);
+            if (isResult(event)) result = event;
+          } else {
+            s.batcher.addLine(line);
+          }
+        },
+        onStderrLine: (line) => s.batcher.addLine(line),
+      });
+      exitCode = deploy.exitCode;
+    } finally {
+      await dns.cleanup();
+    }
   }
   // The final batch can still be in flight when arco exits: wait for it so a revoked run is noticed before info/finish.
   await s.batcher.flush();

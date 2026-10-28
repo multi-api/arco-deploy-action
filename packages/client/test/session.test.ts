@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -18,9 +18,11 @@ const BOUNDARY = 'arn:aws:iam::123:policy/boundary';
 
 let calls: { path: string; body: any }[];
 let project: string;
+let startExtra: Record<string, unknown>;
 
 beforeEach(() => {
   calls = [];
+  startExtra = {};
   project = mkdtempSync(join(tmpdir(), 'arco-client-'));
   mkdirSync(join(project, 'vendor/bin'), { recursive: true });
   const fake = resolve(__dirname, 'fixtures/fake-arco.mjs');
@@ -34,6 +36,7 @@ beforeEach(() => {
       return Response.json({
         credentials: { accessKeyId: 'AKIAEXAMPLE12345', secretAccessKey: SECRET, sessionToken: 'SESSIONTOKEN-xyz', expiration: '2026-10-21T13:00:00Z' },
         region: 'us-east-1', environment: 'production', mode: 'deploy', permissionsBoundary: BOUNDARY,
+        ...startExtra,
       });
     }
     return new Response(null, { status: 204 });
@@ -75,6 +78,116 @@ describe('startRun + deployAndFinish', () => {
     const spawned = vi.mocked(spawn).mock.calls;
     expect(spawned.length).toBeGreaterThan(0);
     for (const [, , options] of spawned) expect(options).toMatchObject({ uid: process.getuid!(), gid: process.getgid!() });
+  });
+});
+
+describe('external DNS', () => {
+  const DNS = {
+    profile: 'arco-cloud-dns',
+    credentials: { accessKeyId: 'ASIADNSKEY98765', secretAccessKey: 'dnsSecretValue/987', sessionToken: 'dnsSessionToken-987', expiration: '2026-10-28T13:00:00Z' },
+  };
+  const CF = 'cf-token-abcdef123';
+  beforeEach(() => {
+    startExtra = { dns: DNS, cloudflareToken: CF };
+  });
+  const argv = (file: string, cmd: string) => readFileSafe(file).split('\n').find((l) => l.split(' ')[0] === cmd) ?? '';
+
+  it('exposes dns and cloudflareToken on the session', async () => {
+    const s = await session();
+    expect(s.dns).toEqual(DNS);
+    expect(s.cloudflareToken).toBe(CF);
+  });
+
+  it('defaults to null when Cloud sends neither', async () => {
+    startExtra = {};
+    const s = await session();
+    expect(s.dns).toBeNull();
+    expect(s.cloudflareToken).toBeNull();
+  });
+
+  it('gives the profile file, flag and token to the deploy child only, and removes the file afterwards', async () => {
+    const dump = join(project, 'env.json');
+    const callsFile = join(project, 'calls.txt');
+    const s = await session();
+    const code = await deployAndFinish(s, dep('deploy', { ...process.env, FAKE_ARCO_ENVDUMP: dump, FAKE_ARCO_CALLS: callsFile }));
+    expect(code).toBe(0);
+
+    const deployEnv = JSON.parse(readFileSync(`${dump}.deploy`, 'utf8'));
+    expect(deployEnv.CLOUDFLARE_API_TOKEN).toBe(CF);
+    expect(deployEnv.AWS_SHARED_CREDENTIALS_FILE).toMatch(/credentials$/);
+    expect(argv(callsFile, 'deploy')).toBe('deploy --env=production --yes --json --dns-profile=arco-cloud-dns');
+    for (const cmd of ['info', '--version']) {
+      const env = JSON.parse(readFileSync(`${dump}.${cmd}`, 'utf8'));
+      expect(env).not.toHaveProperty('CLOUDFLARE_API_TOKEN');
+      expect(env).not.toHaveProperty('AWS_SHARED_CREDENTIALS_FILE');
+      expect(argv(callsFile, cmd)).not.toContain('--dns-profile');
+    }
+    expect(existsSync(deployEnv.AWS_SHARED_CREDENTIALS_FILE)).toBe(false);
+  });
+
+  it('finishes the run as dns.credentials_file_failed when the file cannot be written, without running arco', async () => {
+    const callsFile = join(project, 'calls.txt');
+    const s = await session();
+    const code = await deployAndFinish(s, {
+      ...dep('deploy', { ...process.env, FAKE_ARCO_CALLS: callsFile }),
+      dnsDir: join(project, 'does-not-exist'),
+    });
+    expect(code).toBe(1);
+    expect(existsSync(callsFile)).toBe(false);
+    const finish = calls.at(-1)!;
+    expect(finish.path).toBe('finish');
+    expect(finish.body).toMatchObject({ result: 'failed', error_code: 'dns.credentials_file_failed', rolled_back: false, revision: null });
+    expect(finish.body.error_message).toMatch(/^Could not write the DNS credentials file: ENOENT/);
+    const lines = calls.filter((c) => c.path === 'logs').flatMap((c) => c.body.lines).join('\n');
+    expect(lines).toContain('Could not write the DNS credentials file');
+  });
+
+  it('redacts secrets from the dns.credentials_file_failed message', async () => {
+    const s = await session();
+    const code = await deployAndFinish(s, { ...dep('deploy', { ...process.env }), dnsDir: join(project, CF) });
+    expect(code).toBe(1);
+    const finish = calls.at(-1)!;
+    expect(finish.body.error_code).toBe('dns.credentials_file_failed');
+    expect(finish.body.error_message).not.toContain(CF);
+    expect(finish.body.error_message).toContain('***');
+  });
+
+  it('removes the file when arco exits non-zero', async () => {
+    const dump = join(project, 'env.json');
+    const s = await session();
+    const code = await deployAndFinish(s, dep('deploy', { ...process.env, FAKE_ARCO_ENVDUMP: dump, FAKE_ARCO_SCENARIO: 'crash' }));
+    expect(code).toBe(2);
+    const file = JSON.parse(readFileSync(`${dump}.deploy`, 'utf8')).AWS_SHARED_CREDENTIALS_FILE;
+    expect(file).toBeTruthy();
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it('removes the file when the run is aborted', async () => {
+    const dump = join(project, 'env.json');
+    const callsFile = join(project, 'calls.txt');
+    const s = await session();
+    const done = deployAndFinish(s, { ...dep('deploy', { ...process.env, FAKE_ARCO_ENVDUMP: dump, FAKE_ARCO_CALLS: callsFile, FAKE_ARCO_SCENARIO: 'hang' }), killGraceMs: 50 });
+    for (let i = 0; i < 200 && !readFileSafe(callsFile).includes('pid'); i++) await new Promise((r) => setTimeout(r, 25));
+    const file = JSON.parse(readFileSync(`${dump}.deploy`, 'utf8')).AWS_SHARED_CREDENTIALS_FILE;
+    expect(existsSync(file)).toBe(true);
+    revoke(s);
+    await expect(done).rejects.toThrow(/ended this run/);
+    expect(existsSync(file)).toBe(false);
+  }, 10000);
+
+  it('redacts the token and the three DNS values from logs and secrets', async () => {
+    const s = await session();
+    for (const v of [CF, DNS.credentials.accessKeyId, DNS.credentials.secretAccessKey, DNS.credentials.sessionToken]) expect(s.secrets).toContain(v);
+    await deployAndFinish(s, dep('deploy', { ...process.env, FAKE_ARCO_LEAK_DNS: '1' }));
+    const lines = calls.filter((c) => c.path === 'logs').flatMap((c) => c.body.lines).join('\n');
+    expect(lines).toContain('[arco-cloud-dns]'); // the child could read the file
+    expect(lines).toContain('cloudflare=***');
+    for (const v of [CF, DNS.credentials.accessKeyId, DNS.credentials.secretAccessKey, DNS.credentials.sessionToken]) expect(lines).not.toContain(v);
+  });
+
+  it('fails the start on a malformed answer', async () => {
+    startExtra = { cloudflareToken: 12 };
+    await expect(session()).rejects.toThrow(/start answer was malformed/);
   });
 });
 

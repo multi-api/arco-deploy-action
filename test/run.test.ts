@@ -70,7 +70,7 @@ describe('run', () => {
     expect(code).toBe(0);
     const start = calls[0];
     expect(start.path).toBe('start');
-    expect(start.body).toEqual({ nonce: 'nonce-123456' });
+    expect(start.body).toEqual({ nonce: 'nonce-123456', capabilities: ['external_dns'] });
     expect(start.headers).toMatchObject({ Authorization: 'Bearer bearer-token-abcdef', 'X-Arco-Cloud-Api': '1', Accept: 'application/json', 'Content-Type': 'application/json' });
     expect(finish()).toMatchObject({ result: 'succeeded', revision: 'r42', rolled_back: false, error_code: null, error_message: null, arco_version: '0.10.0' });
     expect(finish().inventory.resources[0].name).toBe('jobs');

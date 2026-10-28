@@ -1,3 +1,5 @@
+import type { ExternalDns } from './dns.js';
+
 export interface Credentials {
   accessKeyId: string;
   secretAccessKey: string;
@@ -12,6 +14,10 @@ export interface StartResponse {
   mode: string;
   /** IAM permissions boundary ARN for v2 connect accounts; null/absent for v1 accounts and older Cloud. */
   permissionsBoundary?: string | null;
+  /** Route 53 credentials for a DNS zone in another AWS account; null/absent when not needed and from older Cloud. */
+  dns?: ExternalDns | null;
+  /** Cloudflare API token for Cloudflare-managed domains; null/absent when not needed and from older Cloud. */
+  cloudflareToken?: string | null;
 }
 
 export interface LogsPayload {
@@ -97,7 +103,8 @@ export class CloudApi {
   }
 
   async start(nonce: string): Promise<StartResponse> {
-    return (await this.post('start', { nonce }, true)) as StartResponse;
+    // `capabilities` tells Cloud this client can apply external DNS; without it Cloud refuses runs that need it.
+    return (await this.post('start', { nonce, capabilities: ['external_dns'] }, true)) as StartResponse;
   }
 
   async logs(payload: LogsPayload): Promise<void> {
