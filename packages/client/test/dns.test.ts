@@ -5,10 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, writeFile: vi.fn(actual.writeFile) };
+  return { ...actual, writeFile: vi.fn(actual.writeFile), chown: vi.fn(actual.chown) };
 });
 
-import { writeFile } from 'node:fs/promises';
+import { chown, writeFile } from 'node:fs/promises';
 import { CloudApi, parseExternalDns, withExternalDns, type ExternalDns } from '../src/index.js';
 
 const DNS: ExternalDns = {
@@ -55,6 +55,7 @@ describe('withExternalDns', () => {
   let dir: string;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'arco-dns-test-'));
+    vi.mocked(chown).mockClear();
   });
 
   it('writes the profile file with mode 0600 and appends the flag', async () => {
@@ -102,6 +103,36 @@ describe('withExternalDns', () => {
   it('removes the temporary directory and rethrows when the write fails', async () => {
     vi.mocked(writeFile).mockRejectedValueOnce(Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }));
     await expect(withExternalDns({ PATH: '/bin' }, ['deploy'], { dns: DNS, cloudflareToken: null }, dir)).rejects.toThrow(/ENOSPC/);
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it('hands the directory and the file to the child uid/gid', async () => {
+    vi.mocked(chown).mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined);
+    const r = await withExternalDns({ PATH: '/bin' }, ['deploy'], { dns: DNS, cloudflareToken: null }, dir, { uid: 1001, gid: 1002 });
+    const file = r.env.AWS_SHARED_CREDENTIALS_FILE!;
+    expect(vi.mocked(chown).mock.calls).toEqual([
+      [dirname(file), 1001, 1002],
+      [file, 1001, 1002],
+    ]);
+    await r.cleanup();
+  });
+
+  it('leaves the other id unchanged (-1) when only one is given', async () => {
+    vi.mocked(chown).mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined);
+    const r = await withExternalDns({ PATH: '/bin' }, ['deploy'], { dns: DNS, cloudflareToken: null }, dir, { uid: 1001 });
+    expect(vi.mocked(chown).mock.calls.map(([, uid, gid]) => [uid, gid])).toEqual([[1001, -1], [1001, -1]]);
+    await r.cleanup();
+  });
+
+  it('does not chown without an owner', async () => {
+    const r = await withExternalDns({ PATH: '/bin' }, ['deploy'], { dns: DNS, cloudflareToken: null }, dir, {});
+    expect(chown).not.toHaveBeenCalled();
+    await r.cleanup();
+  });
+
+  it('removes the temporary directory and rethrows when the chown fails', async () => {
+    vi.mocked(chown).mockRejectedValueOnce(Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' }));
+    await expect(withExternalDns({ PATH: '/bin' }, ['deploy'], { dns: DNS, cloudflareToken: null }, dir, { uid: 1001, gid: 1002 })).rejects.toThrow(/EPERM/);
     expect(readdirSync(dir)).toEqual([]);
   });
 

@@ -185,9 +185,20 @@ describe('external DNS', () => {
     for (const v of [CF, DNS.credentials.accessKeyId, DNS.credentials.secretAccessKey, DNS.credentials.sessionToken]) expect(lines).not.toContain(v);
   });
 
-  it('fails the start on a malformed answer', async () => {
-    startExtra = { cloudflareToken: 12 };
+  it.each([
+    ['cloudflareToken', { cloudflareToken: 12 }],
+    ['dns', { dns: { profile: 'arco-cloud-dns' } }],
+    ['credentials', { credentials: 'nope' }],
+    ['credentials.secretAccessKey', { credentials: { accessKeyId: 'AKIAEXAMPLE12345', sessionToken: 'SESSIONTOKEN-xyz' } }],
+    ['region', { region: 7 }],
+  ])('reports cloud.start_answer_invalid and fails the start on a malformed %s', async (field, extra) => {
+    startExtra = extra;
     await expect(session()).rejects.toThrow(/start answer was malformed/);
+    const finish = calls.at(-1)!;
+    expect(finish.path).toBe('finish');
+    expect(finish.body).toMatchObject({ result: 'failed', error_code: 'cloud.start_answer_invalid', rolled_back: false, revision: null });
+    expect(finish.body.error_message).toContain(`(${field}`);
+    expect(JSON.stringify(finish.body)).not.toContain(SECRET);
   });
 });
 
