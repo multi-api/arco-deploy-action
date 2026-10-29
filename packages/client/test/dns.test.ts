@@ -154,13 +154,13 @@ describe('withExternalDns', () => {
 describe('CloudApi.start', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it('posts the external_dns capability', async () => {
+  it('posts the external_dns capability and config layer support', async () => {
     const bodies: any[] = [];
     vi.stubGlobal('fetch', async (_url: string, init: any) => {
       bodies.push(JSON.parse(init.body));
       return Response.json({ credentials: {}, region: 'us-east-1' });
     });
     await new CloudApi('https://cloud.test', 'tok', 'dep_1').start('nonce-1');
-    expect(bodies[0]).toEqual({ nonce: 'nonce-1', capabilities: ['external_dns'] });
+    expect(bodies[0]).toEqual({ nonce: 'nonce-1', capabilities: ['external_dns'], supports_config_layer: true });
   });
 });

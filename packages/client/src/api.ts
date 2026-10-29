@@ -1,4 +1,5 @@
 import type { ExternalDns } from './dns.js';
+import type { ConfigLayer } from './layer.js';
 
 export interface Credentials {
   accessKeyId: string;
@@ -18,6 +19,8 @@ export interface StartResponse {
   dns?: ExternalDns | null;
   /** Cloudflare API token for Cloudflare-managed domains; null/absent when not needed and from older Cloud. */
   cloudflareToken?: string | null;
+  /** The Arco Cloud config layer to hand Arco via ARCO_CONFIG_LAYER; null/absent without managed resources and from older Cloud. */
+  config?: ConfigLayer | null;
 }
 
 export interface LogsPayload {
@@ -103,8 +106,9 @@ export class CloudApi {
   }
 
   async start(nonce: string): Promise<StartResponse> {
-    // `capabilities` tells Cloud this client can apply external DNS; without it Cloud refuses runs that need it.
-    return (await this.post('start', { nonce, capabilities: ['external_dns'] }, true)) as StartResponse;
+    // `capabilities` tells Cloud this client can apply external DNS, and `supports_config_layer` that it hands Arco the
+    // config layer; without them Cloud refuses runs that need them.
+    return (await this.post('start', { nonce, capabilities: ['external_dns'], supports_config_layer: true }, true)) as StartResponse;
   }
 
   async logs(payload: LogsPayload): Promise<void> {

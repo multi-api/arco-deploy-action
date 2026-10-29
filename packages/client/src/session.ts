@@ -2,6 +2,7 @@ import { CloudApi, CloudApiError, isRunLost, type Credentials, type StartRespons
 import { Redactor, redactValue } from './redactor.js';
 import { Batcher, type BatcherOptions } from './batcher.js';
 import { parseExternalDns, withExternalDns, type ExternalDns } from './dns.js';
+import { CONFIG_LAYER_MIN_ARCO, parseConfigLayer, supportsConfigLayer, withConfigLayer } from './layer.js';
 import {
   deployArgs,
   infoArgs,
@@ -133,6 +134,7 @@ function parseStartAnswer(started: unknown) {
     if (typeof c[key] !== 'string' || c[key] === '') throw malformed(`credentials.${key}`);
   }
   if (typeof region !== 'string' || region === '') throw malformed('region');
+  parseConfigLayer(started);
   return { credentials: credentials as Credentials, region, dns, cloudflareToken };
 }
 
@@ -217,11 +219,60 @@ export interface DeployOptions {
   killGraceMs?: number;
   /** Where the DNS credentials file's temporary directory is created. Default: the OS temporary directory. */
   dnsDir?: string;
+  /** Where the config layer file's temporary directory is created. Default: the OS temporary directory. */
+  layerDir?: string;
 }
 
-/** deploy -> info -> version -> finish. Returns the process exit code to mirror (0 = success). */
+/**
+ * With a config layer: version check -> layer file. Then deploy -> info -> version -> finish. Returns the process
+ * exit code to mirror (0 = success).
+ */
 export async function deployAndFinish(s: RunSession, o: DeployOptions): Promise<number> {
-  const childEnv: NodeJS.ProcessEnv = { ...o.env, ...s.awsEnv };
+  const awsEnv: NodeJS.ProcessEnv = { ...o.env, ...s.awsEnv };
+  const common = { cwd: o.cwd, uid: o.uid, gid: o.gid };
+  const throwIfAborted = () => {
+    const message = s.abortMessage();
+    if (message !== null) throw new RunAbortedError(message);
+  };
+  const failEarly = async (code: string, message: string, arcoVersion: string | null = null) => {
+    s.batcher.addLine(message);
+    await s.batcher.flush();
+    await finishWithRetry(s.api, { ...buildFailure(code, message), arco_version: arcoVersion }, s.sleep, s.warn);
+    return 1;
+  };
+
+  const layer = s.started.config ?? null;
+  let arcoVersion: string | null = null;
+  if (layer !== null) {
+    // An Arco older than the layer ignores ARCO_CONFIG_LAYER and would deploy without the managed resources.
+    const version = await runArco(versionArgs(), { ...common, env: awsEnv, signal: s.signal, killGraceMs: o.killGraceMs });
+    if (version.exitCode === 0) arcoVersion = parseVersion(version.stdout);
+    throwIfAborted();
+    if (!supportsConfigLayer(arcoVersion)) {
+      return failEarly(
+        'config.arco_outdated',
+        `This environment has Arco Cloud resources, which need multiapi/arco ${CONFIG_LAYER_MIN_ARCO} or later; ` +
+          `the project has ${arcoVersion === null ? 'an unknown version' : arcoVersion}. Run composer require multiapi/arco:^0.13.`,
+        arcoVersion,
+      );
+    }
+  }
+
+  // Every arco child reads the layer (Arco reads it in deploy and info); the file is removed however the run ends.
+  let layerChild: Awaited<ReturnType<typeof withConfigLayer>>;
+  try {
+    layerChild = await withConfigLayer(awsEnv, layer, o.layerDir, { uid: o.uid, gid: o.gid });
+  } catch (e) {
+    return failEarly('config.layer_file_failed', s.redact(`Could not write the config layer file: ${e instanceof Error ? e.message : String(e)}`), arcoVersion);
+  }
+  try {
+    return await runAndFinish(s, o, layerChild.env, arcoVersion);
+  } finally {
+    await layerChild.cleanup();
+  }
+}
+
+async function runAndFinish(s: RunSession, o: DeployOptions, childEnv: NodeJS.ProcessEnv, knownVersion: string | null): Promise<number> {
   // Only deploys get the boundary (not inventory, info or --version), and only when Cloud sent a non-empty string.
   const boundary = s.started.permissionsBoundary;
   const deployEnv: NodeJS.ProcessEnv =
@@ -285,9 +336,11 @@ export async function deployAndFinish(s: RunSession, o: DeployOptions): Promise<
   const inventory = info.exitCode === 0 ? parseInventory(info.stdout) : null;
   if (inventory === null) s.batcher.addLine('Could not collect the resource inventory.');
 
-  let arcoVersion: string | null = null;
-  const version = await runArco(versionArgs(), { ...common, env: childEnv, signal: s.signal, killGraceMs: o.killGraceMs });
-  if (version.exitCode === 0) arcoVersion = parseVersion(version.stdout);
+  let arcoVersion = knownVersion;
+  if (arcoVersion === null) {
+    const version = await runArco(versionArgs(), { ...common, env: childEnv, signal: s.signal, killGraceMs: o.killGraceMs });
+    if (version.exitCode === 0) arcoVersion = parseVersion(version.stdout);
+  }
 
   await s.batcher.flush();
   throwIfAborted();

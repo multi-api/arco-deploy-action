@@ -202,6 +202,89 @@ describe('external DNS', () => {
   });
 });
 
+describe('config layer', () => {
+  const LAYER = { schema: 1, app: 'shop', environments: { production: { queues: { emails: { timeout: 60 } }, variables: { MAIL_FROM_ADDRESS: 'hi@shop.test' } } } };
+  beforeEach(() => {
+    startExtra = { config: LAYER };
+  });
+  const layerLines = (file: string) => readFileSafe(file).split('\n').filter((l) => l.startsWith('layer '));
+  const run = async (extra: NodeJS.ProcessEnv = {}, opts: Record<string, unknown> = {}) => {
+    const callsFile = join(project, 'calls.txt');
+    const dump = join(project, 'env.json');
+    const s = await session();
+    const code = await deployAndFinish(s, {
+      ...dep('deploy', { ...process.env, FAKE_ARCO_VERSION: '0.13.0', FAKE_ARCO_CALLS: callsFile, FAKE_ARCO_ENVDUMP: dump, ...extra }),
+      ...opts,
+    });
+    return { code, callsFile, dump, finish: calls.at(-1)! };
+  };
+
+  it('refuses a start answer whose config is not an object', async () => {
+    for (const config of ['{}', [], 42, true]) {
+      calls = [];
+      startExtra = { config };
+      await expect(session()).rejects.toThrow('Arco Cloud start answer was malformed (config)');
+      expect(calls.at(-1)).toMatchObject({ path: 'finish', body: { result: 'failed', error_code: 'cloud.start_answer_invalid' } });
+    }
+  });
+
+  it('writes the layer to a 0600 file for deploy and info, and removes it afterwards', async () => {
+    const { code, callsFile, dump, finish } = await run();
+    expect(code).toBe(0);
+    // The version check runs before the file exists.
+    expect(layerLines(callsFile)).toEqual([`layer deploy 600 ${JSON.stringify(LAYER)}`, `layer info 600 ${JSON.stringify(LAYER)}`]);
+    const file = JSON.parse(readFileSync(`${dump}.deploy`, 'utf8')).ARCO_CONFIG_LAYER;
+    expect(file).toMatch(/config-layer\.json$/);
+    expect(JSON.parse(readFileSync(`${dump}.info`, 'utf8')).ARCO_CONFIG_LAYER).toBe(file);
+    expect(existsSync(file)).toBe(false);
+    expect(finish.body).toMatchObject({ result: 'succeeded', arco_version: '0.13.0' });
+  });
+
+  it('checks the Arco version once, before deploying', async () => {
+    const { callsFile } = await run();
+    const commands = readFileSafe(callsFile).split('\n').filter((l) => l !== '' && !l.startsWith('layer ')).map((l) => l.split(' ')[0]);
+    expect(commands).toEqual(['--version', 'deploy', 'info']);
+  });
+
+  it.each([
+    ['0.12.1', '0.12.1'],
+    ['fail', 'an unknown version'],
+  ])('fails as config.arco_outdated without deploying when Arco is %s', async (version, shown) => {
+    const { code, callsFile, finish } = await run({ FAKE_ARCO_VERSION: version });
+    expect(code).toBe(1);
+    expect(readFileSafe(callsFile)).not.toMatch(/^(deploy|info)/m);
+    expect(finish.body).toMatchObject({ result: 'failed', error_code: 'config.arco_outdated', rolled_back: false, revision: null });
+    expect(finish.body.error_message).toContain(`the project has ${shown}`);
+  });
+
+  it('accepts a later Arco', async () => {
+    const { code } = await run({ FAKE_ARCO_VERSION: '1.0.0-beta.1' });
+    expect(code).toBe(0);
+  });
+
+  it('removes the file when arco exits non-zero', async () => {
+    const { code, dump } = await run({ FAKE_ARCO_SCENARIO: 'failed' });
+    expect(code).toBe(1);
+    expect(existsSync(JSON.parse(readFileSync(`${dump}.deploy`, 'utf8')).ARCO_CONFIG_LAYER)).toBe(false);
+  });
+
+  it('finishes the run as config.layer_file_failed when the file cannot be written, without deploying', async () => {
+    const { code, callsFile, finish } = await run({}, { layerDir: join(project, 'does-not-exist') });
+    expect(code).toBe(1);
+    expect(readFileSafe(callsFile)).not.toMatch(/^(deploy|info)/m);
+    expect(finish.body).toMatchObject({ result: 'failed', error_code: 'config.layer_file_failed', arco_version: '0.13.0' });
+  });
+
+  it('runs no version check and sets no ARCO_CONFIG_LAYER without a layer', async () => {
+    startExtra = { config: null };
+    const { code, callsFile, dump } = await run({ FAKE_ARCO_VERSION: '0.12.1' });
+    expect(code).toBe(0);
+    expect(layerLines(callsFile)).toEqual([]);
+    expect(JSON.parse(readFileSync(`${dump}.deploy`, 'utf8'))).not.toHaveProperty('ARCO_CONFIG_LAYER');
+    expect(readFileSafe(callsFile).split('\n')[0]!.split(' ')[0]).toBe('deploy');
+  });
+});
+
 describe('redaction of structured payloads', () => {
   const literals = ['true', '2525', 'failed', 'succeeded', 'null'];
 

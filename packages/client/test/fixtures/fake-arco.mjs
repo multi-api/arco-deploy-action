@@ -5,12 +5,18 @@
 //   FAKE_ARCO_ENVDUMP  = file to write the child's environment (JSON) to
 //   FAKE_ARCO_INFO     = ok (default) | bad | fail
 //   FAKE_ARCO_CALLS    = file to append each invocation's argv to
-//   FAKE_ARCO_VERSION  = hang: `--version` blocks until killed
+//   FAKE_ARCO_VERSION  = hang: `--version` blocks until killed; fail: exits 1; anything else: the version printed (default 0.10.0)
+//   (with FAKE_ARCO_CALLS, every command that sees ARCO_CONFIG_LAYER appends `layer <cmd> <octal mode> <file content>`)
 //   FAKE_ARCO_LEAK_DNS = set: deploy prints the shared credentials file and CLOUDFLARE_API_TOKEN
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 
 const args = process.argv.slice(2);
 if (process.env.FAKE_ARCO_CALLS) appendFileSync(process.env.FAKE_ARCO_CALLS, args.join(' ') + '\n');
+if (process.env.FAKE_ARCO_CALLS && process.env.ARCO_CONFIG_LAYER) {
+  const layer = process.env.ARCO_CONFIG_LAYER;
+  const mode = (statSync(layer).mode & 0o777).toString(8);
+  appendFileSync(process.env.FAKE_ARCO_CALLS, `layer ${args[0]} ${mode} ${readFileSync(layer, 'utf8')}\n`);
+}
 if (process.env.FAKE_ARCO_ENVDUMP) writeFileSync(process.env.FAKE_ARCO_ENVDUMP, JSON.stringify(process.env));
 if (process.env.FAKE_ARCO_ENVDUMP) writeFileSync(`${process.env.FAKE_ARCO_ENVDUMP}.${args[0]}`, JSON.stringify(process.env)); // per-command dump
 const scenario = process.env.FAKE_ARCO_SCENARIO ?? 'deployed';
@@ -22,7 +28,8 @@ if (args[0] === '--version') {
     setInterval(() => {}, 1000);
     await new Promise(() => {});
   }
-  console.log('Arco 0.10.0');
+  if (process.env.FAKE_ARCO_VERSION === 'fail') process.exit(1);
+  console.log(`Arco ${process.env.FAKE_ARCO_VERSION ?? '0.10.0'}`);
 } else if (args[0] === 'deploy' && scenario === 'opterror') {
   console.error('The "--bogus" option does not exist.');
   process.exit(1);
