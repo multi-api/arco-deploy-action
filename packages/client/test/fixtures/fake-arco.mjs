@@ -8,7 +8,9 @@
 //   FAKE_ARCO_VERSION  = hang: `--version` blocks until killed; fail: exits 1; anything else: the version printed (default 0.10.0)
 //   (with FAKE_ARCO_CALLS, every command that sees ARCO_CONFIG_LAYER appends `layer <cmd> <octal mode> <file content>`)
 //   FAKE_ARCO_LEAK_DNS = set: deploy prints the shared credentials file and CLOUDFLARE_API_TOKEN
-import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+//   FAKE_ARCO_TREE     = file deploy writes `.arco-cloud/` to as JSON ({relative path: content}), or null without it
+import { appendFileSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const args = process.argv.slice(2);
 if (process.env.FAKE_ARCO_CALLS) appendFileSync(process.env.FAKE_ARCO_CALLS, args.join(' ') + '\n');
@@ -34,6 +36,13 @@ if (args[0] === '--version') {
   console.error('The "--bogus" option does not exist.');
   process.exit(1);
 } else if (args[0] === 'deploy') {
+  if (process.env.FAKE_ARCO_TREE) {
+    const root = join(process.cwd(), '.arco-cloud');
+    const tree = existsSync(root)
+      ? Object.fromEntries(readdirSync(root, { recursive: true }).filter((p) => statSync(join(root, p)).isFile()).map((p) => [p, readFileSync(join(root, p), 'utf8')]))
+      : null;
+    writeFileSync(process.env.FAKE_ARCO_TREE, JSON.stringify(tree));
+  }
   // Register before the first output so a stop can never race ahead of these.
   if (scenario === 'stubborn') process.on('SIGTERM', () => {});
   if (scenario === 'hang' || scenario === 'stubborn') appendFileSync(process.env.FAKE_ARCO_CALLS, `pid ${process.pid}\n`);

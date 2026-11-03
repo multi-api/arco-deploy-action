@@ -2,6 +2,7 @@ import { CloudApi, CloudApiError, isRunLost, type Credentials, type StartRespons
 import { Redactor, redactValue } from './redactor.js';
 import { Batcher, type BatcherOptions } from './batcher.js';
 import { parseExternalDns, withExternalDns, type ExternalDns } from './dns.js';
+import { arcoLaravelVersion, isDevVersion, parseExtensions, satisfiesMinVersion, withExtensions } from './extensions.js';
 import { CONFIG_LAYER_MIN_ARCO, parseConfigLayer, supportsConfigLayer, withConfigLayer } from './layer.js';
 import {
   deployArgs,
@@ -135,6 +136,7 @@ function parseStartAnswer(started: unknown) {
   }
   if (typeof region !== 'string' || region === '') throw malformed('region');
   parseConfigLayer(started);
+  parseExtensions(started);
   return { credentials: credentials as Credentials, region, dns, cloudflareToken };
 }
 
@@ -224,8 +226,9 @@ export interface DeployOptions {
 }
 
 /**
- * With a config layer: version check -> layer file. Then deploy -> info -> version -> finish. Returns the process
- * exit code to mirror (0 = success).
+ * With a config layer: version check -> layer file. In deploy mode: extensions (arco-laravel check, then
+ * `.arco-cloud/` wiped and refilled). Then deploy -> info -> version -> finish. Returns the process exit code to
+ * mirror (0 = success).
  */
 export async function deployAndFinish(s: RunSession, o: DeployOptions): Promise<number> {
   const awsEnv: NodeJS.ProcessEnv = { ...o.env, ...s.awsEnv };
@@ -266,7 +269,37 @@ export async function deployAndFinish(s: RunSession, o: DeployOptions): Promise<
     return failEarly('config.layer_file_failed', s.redact(`Could not write the config layer file: ${e instanceof Error ? e.message : String(e)}`), arcoVersion);
   }
   try {
-    return await runAndFinish(s, o, layerChild.env, arcoVersion);
+    if (o.mode !== 'deploy') return await runAndFinish(s, o, layerChild.env, arcoVersion);
+
+    const extensions = parseExtensions(s.started);
+    const installed = arcoLaravelVersion(o.cwd);
+    for (const [key, ext] of Object.entries(extensions)) {
+      if (ext.min_arco_laravel === undefined) continue;
+      if (installed !== null && isDevVersion(installed)) {
+        s.batcher.addLine(`multiapi/arco-laravel is ${installed}, a development version: taking it as recent enough for the ${key} extension.`);
+        continue;
+      }
+      if (!satisfiesMinVersion(installed, ext.min_arco_laravel)) {
+        // Cloud's own wording, shown as is; the fallback names the package only.
+        const message =
+          ext.message_outdated ??
+          `The ${key} extension needs multiapi/arco-laravel ${ext.min_arco_laravel} or later; the project has ${installed ?? 'none installed'}.`;
+        return await failEarly('extensions.arco_laravel_outdated', s.redact(message), arcoVersion);
+      }
+    }
+
+    // Always, even without extensions: a .arco-cloud/ committed to the repository must never ship.
+    let extChild: Awaited<ReturnType<typeof withExtensions>>;
+    try {
+      extChild = await withExtensions(o.cwd, extensions, undefined, (line) => s.batcher.addLine(line));
+    } catch (e) {
+      return await failEarly('extensions.failed', s.redact(e instanceof Error ? e.message : String(e)), arcoVersion);
+    }
+    try {
+      return await runAndFinish(s, o, layerChild.env, arcoVersion);
+    } finally {
+      await extChild.cleanup();
+    }
   } finally {
     await layerChild.cleanup();
   }

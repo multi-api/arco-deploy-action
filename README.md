@@ -26,6 +26,26 @@ default `deploy`); `working-directory` (default `.`).
 
 Requires Arco >= 0.10 (`--json` output). All Arco output parsing lives in `packages/client/src/arco.ts`.
 
+### Arco Cloud extensions
+
+Cloud's `start` answer can carry `extensions`: a map from a key (`/^[a-z][a-z0-9-]*$/`) to
+`{ version, url, sha256, config, min_arco_laravel?, message_outdated? }`. The client treats them as opaque. In
+deploy mode, before `arco deploy`, it:
+
+1. fails the run as `extensions.arco_laravel_outdated` when an extension sets `min_arco_laravel` and
+   `vendor/composer/installed.json` has an older `multiapi/arco-laravel`, or none (the message is Cloud's
+   `message_outdated`, shown as is; a Composer `dev-*` / `*-dev` version counts as recent enough);
+2. **always removes `.arco-cloud/` from the checkout** when it exists, even when Cloud sent no extensions (a copy
+   committed to the repository must never ship);
+3. downloads each tarball to a temporary file outside the checkout, checks its sha256, refuses absolute paths,
+   `..` segments and links, extracts it into `.arco-cloud/<key>/` and writes `config` there as `config.json`.
+   Any failure finishes the run as `extensions.failed` without deploying;
+4. removes `.arco-cloud/` again once the run ends, however it ends.
+
+Arco packages `.arco-cloud/` like any other project file, so an `exclude()` pattern in `arco.php` that matches it
+(such as `.*/**`) drops the extensions from the package. `arco info --json` does not expose the effective exclude
+patterns, so the client cannot check this: keep `.arco-cloud/` out of your exclude patterns.
+
 ## Development
 
 ```
