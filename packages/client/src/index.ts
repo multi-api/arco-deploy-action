@@ -5,3 +5,4 @@ export * from './session.js';
 export * from './redactor.js';
 export * from './dns.js';
 export * from './layer.js';
+export * from './extensions.js';
