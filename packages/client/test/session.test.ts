@@ -12,6 +12,7 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { CloudApi, CloudApiError, buildFailure, deployAndFinish, finishWithRetry, startRun } from '../src/index.js';
+import { sha256, tarball } from './helpers/tarball.js';
 
 const SECRET = 'SECRETKEY1234567890abcdef';
 const BOUNDARY = 'arn:aws:iam::123:policy/boundary';
@@ -19,10 +20,13 @@ const BOUNDARY = 'arn:aws:iam::123:policy/boundary';
 let calls: { path: string; body: any }[];
 let project: string;
 let startExtra: Record<string, unknown>;
+/** Bodies served for https://ext.test/<name> downloads. */
+let downloads: Record<string, Buffer>;
 
 beforeEach(() => {
   calls = [];
   startExtra = {};
+  downloads = {};
   project = mkdtempSync(join(tmpdir(), 'arco-client-'));
   mkdirSync(join(project, 'vendor/bin'), { recursive: true });
   const fake = resolve(__dirname, 'fixtures/fake-arco.mjs');
@@ -30,6 +34,10 @@ beforeEach(() => {
   chmodSync(join(project, 'vendor/bin/arco'), 0o755);
   vi.mocked(spawn).mockClear();
   vi.stubGlobal('fetch', async (url: string, init: any) => {
+    if (new URL(url).host === 'ext.test') {
+      const body = downloads[new URL(url).pathname.slice(1)];
+      return body ? new Response(body) : new Response(null, { status: 404 });
+    }
     const path = new URL(url).pathname.split('/').pop()!;
     calls.push({ path, body: JSON.parse(init.body) });
     if (path === 'start') {
@@ -282,6 +290,149 @@ describe('config layer', () => {
     expect(layerLines(callsFile)).toEqual([]);
     expect(JSON.parse(readFileSync(`${dump}.deploy`, 'utf8'))).not.toHaveProperty('ARCO_CONFIG_LAYER');
     expect(readFileSafe(callsFile).split('\n')[0]!.split(' ')[0]).toBe('deploy');
+  });
+});
+
+describe('extensions', () => {
+  const OUTDATED = 'Cloud says: update multiapi/arco-laravel to 0.6 or later.';
+  const BOOT = tarball([{ name: 'bootstrap.php', content: '<?php return 1;' }]);
+  const extension = (body: Buffer, extra: Record<string, unknown> = {}) => ({
+    version: '1.0.0',
+    url: 'https://ext.test/sample.tar.gz?X-Amz-Signature=presigned',
+    sha256: sha256(body),
+    config: { enabled: true, rate: 0.5 },
+    ...extra,
+  });
+  beforeEach(() => {
+    downloads = { 'sample.tar.gz': BOOT };
+    startExtra = { extensions: { sample: extension(BOOT) } };
+  });
+  const installed = (version: string) => {
+    mkdirSync(join(project, 'vendor/composer'), { recursive: true });
+    writeFileSync(join(project, 'vendor/composer/installed.json'), JSON.stringify({ packages: [{ name: 'multiapi/arco-laravel', version }] }));
+  };
+  const commit = () => {
+    mkdirSync(join(project, '.arco-cloud/sample'), { recursive: true });
+    writeFileSync(join(project, '.arco-cloud/sample/config.json'), '{"licence":"committed"}');
+  };
+  const run = async (mode: 'deploy' | 'inventory' = 'deploy', extra: NodeJS.ProcessEnv = {}) => {
+    const callsFile = join(project, 'calls.txt');
+    const treeFile = join(project, 'tree.json');
+    const s = await session();
+    const code = await deployAndFinish(s, dep(mode, { ...process.env, FAKE_ARCO_CALLS: callsFile, FAKE_ARCO_TREE: treeFile, ...extra }));
+    const tree = existsSync(treeFile) ? JSON.parse(readFileSync(treeFile, 'utf8')) : undefined;
+    const logged = calls.filter((c) => c.path === 'logs').flatMap((c) => c.body.lines as string[]);
+    return { code, callsFile, tree, logged, finish: calls.at(-1)! };
+  };
+  const deployed = (callsFile: string) => /^deploy /m.test(readFileSafe(callsFile));
+
+  it('removes a committed .arco-cloud before deploying, even without extensions', async () => {
+    startExtra = {};
+    commit();
+    const { code, tree, logged } = await run();
+    expect(code).toBe(0);
+    expect(tree).toBeNull();
+    expect(logged).toContain('Removed an existing .arco-cloud directory from the checkout.');
+  });
+
+  it('extracts and writes config.json', async () => {
+    const { code, tree, logged, finish } = await run();
+    expect(code).toBe(0);
+    expect(tree).toEqual({ 'sample/bootstrap.php': '<?php return 1;', 'sample/config.json': JSON.stringify({ enabled: true, rate: 0.5 }) });
+    expect(logged).toContain('Added the Arco Cloud extension sample 1.0.0.');
+    expect(JSON.stringify(calls)).not.toContain('X-Amz-Signature');
+    expect(finish.body).toMatchObject({ result: 'succeeded' });
+  });
+
+  it('replaces a committed copy with the one from Cloud', async () => {
+    commit();
+    const { tree } = await run();
+    expect(tree['sample/config.json']).toBe(JSON.stringify({ enabled: true, rate: 0.5 }));
+  });
+
+  it('fails the run on a checksum mismatch before arco deploy runs', async () => {
+    startExtra = { extensions: { sample: extension(BOOT, { sha256: 'c'.repeat(64) }) } };
+    const { code, callsFile, finish } = await run();
+    expect(code).toBe(1);
+    expect(deployed(callsFile)).toBe(false);
+    expect(finish.body).toMatchObject({ result: 'failed', error_code: 'extensions.failed', error_message: 'The sample extension did not match its checksum' });
+    expect(existsSync(join(project, '.arco-cloud'))).toBe(false);
+  });
+
+  it('refuses a tarball entry that escapes the directory', async () => {
+    const evil = tarball([{ name: 'bootstrap.php', content: 'x' }, { name: '../../escaped.php', content: 'x' }]);
+    downloads = { 'sample.tar.gz': evil };
+    startExtra = { extensions: { sample: extension(evil) } };
+    const { code, callsFile, finish } = await run();
+    expect(code).toBe(1);
+    expect(deployed(callsFile)).toBe(false);
+    expect(finish.body).toMatchObject({ result: 'failed', error_code: 'extensions.failed' });
+    expect(finish.body.error_message).toContain('outside its directory or a link');
+    expect(existsSync(join(project, '.arco-cloud'))).toBe(false);
+  });
+
+  it('fails as extensions.failed when the download fails, without the URL', async () => {
+    downloads = {};
+    const { code, callsFile, finish } = await run();
+    expect(code).toBe(1);
+    expect(deployed(callsFile)).toBe(false);
+    expect(finish.body).toMatchObject({ error_code: 'extensions.failed', error_message: 'Could not download the sample extension: HTTP 404' });
+  });
+
+  it('fails with extensions.arco_laravel_outdated when the lock has an older arco-laravel', async () => {
+    installed('v0.5.2');
+    startExtra = { extensions: { sample: extension(BOOT, { min_arco_laravel: '0.6.0', message_outdated: OUTDATED }) } };
+    const { code, callsFile, finish, logged } = await run();
+    expect(code).toBe(1);
+    expect(deployed(callsFile)).toBe(false);
+    expect(finish.body).toMatchObject({ result: 'failed', error_code: 'extensions.arco_laravel_outdated', error_message: OUTDATED, rolled_back: false });
+    expect(logged).toContain(OUTDATED);
+  });
+
+  it('fails with extensions.arco_laravel_outdated when arco-laravel is not installed', async () => {
+    startExtra = { extensions: { sample: extension(BOOT, { min_arco_laravel: '0.6.0', message_outdated: OUTDATED }) } };
+    const { code, finish } = await run();
+    expect(code).toBe(1);
+    expect(finish.body).toMatchObject({ error_code: 'extensions.arco_laravel_outdated', error_message: OUTDATED });
+  });
+
+  it('words the outdated failure itself when Cloud sent no message', async () => {
+    installed('0.5.0');
+    startExtra = { extensions: { sample: extension(BOOT, { min_arco_laravel: '0.6.0' }) } };
+    const { finish } = await run();
+    expect(finish.body.error_code).toBe('extensions.arco_laravel_outdated');
+    expect(finish.body.error_message).toBe('The sample extension needs multiapi/arco-laravel 0.6.0 or later; the project has 0.5.0.');
+  });
+
+  it.each([['0.6.0'], ['v0.7.1'], ['dev-main']])('deploys with arco-laravel %s', async (version) => {
+    installed(version);
+    startExtra = { extensions: { sample: extension(BOOT, { min_arco_laravel: '0.6.0', message_outdated: OUTDATED }) } };
+    const { code, tree, logged } = await run();
+    expect(code).toBe(0);
+    expect(tree).toHaveProperty(['sample/bootstrap.php']);
+    if (version === 'dev-main') expect(logged).toContain('multiapi/arco-laravel is dev-main, a development version: taking it as recent enough for the sample extension.');
+  });
+
+  it('removes .arco-cloud after the deploy, success or failure', async () => {
+    for (const scenario of ['deployed', 'failed', 'crash']) {
+      calls = [];
+      const { tree } = await run('deploy', { FAKE_ARCO_SCENARIO: scenario });
+      expect(tree).toHaveProperty(['sample/bootstrap.php']);
+      expect(existsSync(join(project, '.arco-cloud'))).toBe(false);
+    }
+  });
+
+  it('leaves the checkout alone in inventory mode', async () => {
+    commit();
+    const { code } = await run('inventory');
+    expect(code).toBe(0);
+    expect(existsSync(join(project, '.arco-cloud/sample/config.json'))).toBe(true);
+  });
+
+  it('refuses a start answer with malformed extensions', async () => {
+    startExtra = { extensions: { 'Bad/Key': extension(BOOT) } };
+    await expect(session()).rejects.toThrow('Arco Cloud start answer was malformed (extensions)');
+    expect(calls.at(-1)).toMatchObject({ path: 'finish', body: { result: 'failed', error_code: 'cloud.start_answer_invalid' } });
   });
 });
 

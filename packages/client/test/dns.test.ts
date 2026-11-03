@@ -161,6 +161,6 @@ describe('CloudApi.start', () => {
       return Response.json({ credentials: {}, region: 'us-east-1' });
     });
     await new CloudApi('https://cloud.test', 'tok', 'dep_1').start('nonce-1');
-    expect(bodies[0]).toEqual({ nonce: 'nonce-1', capabilities: ['external_dns'], supports_config_layer: true });
+    expect(bodies[0]).toEqual({ nonce: 'nonce-1', capabilities: ['external_dns', 'extensions'], supports_config_layer: true });
   });
 });
