@@ -22,9 +22,16 @@ inputs:
     required: false
     default: deploy
   working-directory:
-    description: Directory containing the Arco project (where vendor/bin/arco lives).
+    description: Directory containing the Arco project (arco.php; vendor/bin/arco for Laravel apps).
     required: false
     default: '.'
+  arco-bin:
+    description: >-
+      Arco binary to run. Empty (the default) uses the ARCO_BIN environment variable, else vendor/bin/arco.
+      A path with a slash is relative to working-directory; a bare name such as "arco" is looked up on PATH
+      (for apps without vendor/ that install Arco with `composer global require multiapi/arco`).
+    required: false
+    default: ''
 runs:
   using: node24
   main: dist/index.js

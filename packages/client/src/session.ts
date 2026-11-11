@@ -11,6 +11,7 @@ import {
   parseEventLine,
   parseInventory,
   parseVersion,
+  resolveArcoBin,
   runArco,
   toFinishPayload,
   versionArgs,
@@ -223,6 +224,11 @@ export interface DeployOptions {
   dnsDir?: string;
   /** Where the config layer file's temporary directory is created. Default: the OS temporary directory. */
   layerDir?: string;
+  /**
+   * The Arco binary. Unset or empty: `env.ARCO_BIN`, else `vendor/bin/arco`. A bare name (`arco`) resolves through
+   * the child's PATH, for apps that install Arco globally instead of in `vendor/`.
+   */
+  arcoBin?: string;
 }
 
 /**
@@ -231,6 +237,7 @@ export interface DeployOptions {
  * mirror (0 = success).
  */
 export async function deployAndFinish(s: RunSession, o: DeployOptions): Promise<number> {
+  const bin = resolveArcoBin(o.arcoBin, o.env);
   const awsEnv: NodeJS.ProcessEnv = { ...o.env, ...s.awsEnv };
   const common = { cwd: o.cwd, uid: o.uid, gid: o.gid };
   const throwIfAborted = () => {
@@ -248,7 +255,7 @@ export async function deployAndFinish(s: RunSession, o: DeployOptions): Promise<
   let arcoVersion: string | null = null;
   if (layer !== null) {
     // An Arco older than the layer ignores ARCO_CONFIG_LAYER and would deploy without the managed resources.
-    const version = await runArco(versionArgs(), { ...common, env: awsEnv, signal: s.signal, killGraceMs: o.killGraceMs });
+    const version = await runArco(versionArgs(), { ...common, env: awsEnv, signal: s.signal, killGraceMs: o.killGraceMs }, bin);
     if (version.exitCode === 0) arcoVersion = parseVersion(version.stdout);
     throwIfAborted();
     if (!supportsConfigLayer(arcoVersion)) {
@@ -269,7 +276,7 @@ export async function deployAndFinish(s: RunSession, o: DeployOptions): Promise<
     return failEarly('config.layer_file_failed', s.redact(`Could not write the config layer file: ${e instanceof Error ? e.message : String(e)}`), arcoVersion);
   }
   try {
-    if (o.mode !== 'deploy') return await runAndFinish(s, o, layerChild.env, arcoVersion);
+    if (o.mode !== 'deploy') return await runAndFinish(s, o, bin, layerChild.env, arcoVersion);
 
     const extensions = parseExtensions(s.started);
     const installed = arcoLaravelVersion(o.cwd);
@@ -296,7 +303,7 @@ export async function deployAndFinish(s: RunSession, o: DeployOptions): Promise<
       return await failEarly('extensions.failed', s.redact(e instanceof Error ? e.message : String(e)), arcoVersion);
     }
     try {
-      return await runAndFinish(s, o, layerChild.env, arcoVersion);
+      return await runAndFinish(s, o, bin, layerChild.env, arcoVersion);
     } finally {
       await extChild.cleanup();
     }
@@ -305,7 +312,7 @@ export async function deployAndFinish(s: RunSession, o: DeployOptions): Promise<
   }
 }
 
-async function runAndFinish(s: RunSession, o: DeployOptions, childEnv: NodeJS.ProcessEnv, knownVersion: string | null): Promise<number> {
+async function runAndFinish(s: RunSession, o: DeployOptions, bin: string, childEnv: NodeJS.ProcessEnv, knownVersion: string | null): Promise<number> {
   // Only deploys get the boundary (not inventory, info or --version), and only when Cloud sent a non-empty string.
   const boundary = s.started.permissionsBoundary;
   const deployEnv: NodeJS.ProcessEnv =
@@ -349,7 +356,7 @@ async function runAndFinish(s: RunSession, o: DeployOptions, childEnv: NodeJS.Pr
           }
         },
         onStderrLine: (line) => s.batcher.addLine(line),
-      });
+      }, bin);
       exitCode = deploy.exitCode;
     } finally {
       await dns.cleanup();
@@ -365,13 +372,13 @@ async function runAndFinish(s: RunSession, o: DeployOptions, childEnv: NodeJS.Pr
     signal: s.signal,
     killGraceMs: o.killGraceMs,
     onStderrLine: (line) => s.batcher.addLine(line),
-  });
+  }, bin);
   const inventory = info.exitCode === 0 ? parseInventory(info.stdout) : null;
   if (inventory === null) s.batcher.addLine('Could not collect the resource inventory.');
 
   let arcoVersion = knownVersion;
   if (arcoVersion === null) {
-    const version = await runArco(versionArgs(), { ...common, env: childEnv, signal: s.signal, killGraceMs: o.killGraceMs });
+    const version = await runArco(versionArgs(), { ...common, env: childEnv, signal: s.signal, killGraceMs: o.killGraceMs }, bin);
     if (version.exitCode === 0) arcoVersion = parseVersion(version.stdout);
   }
 

@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -11,7 +11,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { CloudApi, CloudApiError, buildFailure, deployAndFinish, finishWithRetry, startRun } from '../src/index.js';
+import { ARCO_BIN, CloudApi, CloudApiError, buildFailure, deployAndFinish, finishWithRetry, resolveArcoBin, startRun } from '../src/index.js';
 import { sha256, tarball } from './helpers/tarball.js';
 
 const SECRET = 'SECRETKEY1234567890abcdef';
@@ -596,5 +596,61 @@ describe('finishWithRetry when Cloud refuses the report', () => {
     expect(bodies).toHaveLength(3);
     expect(bodies[2]).toEqual(succeeded);
     expect(sleeps).toEqual([500, 1000]);
+  });
+});
+
+describe('arco binary', () => {
+  /** A directory holding an executable `arco` (the fake), like Composer's global bin dir; the project loses vendor/. */
+  const globalArco = () => {
+    const bin = mkdtempSync(join(tmpdir(), 'arco-global-'));
+    writeFileSync(join(bin, 'arco'), `#!/bin/sh\nexec node "${resolve(__dirname, 'fixtures/fake-arco.mjs')}" "$@"\n`);
+    chmodSync(join(bin, 'arco'), 0o755);
+    rmSync(join(project, 'vendor'), { recursive: true });
+    return bin;
+  };
+  const spawnedFiles = () => vi.mocked(spawn).mock.calls.map((c) => c[0]);
+
+  it('resolveArcoBin: input, then ARCO_BIN, then vendor/bin/arco', () => {
+    expect(ARCO_BIN).toBe('vendor/bin/arco');
+    expect(resolveArcoBin()).toBe('vendor/bin/arco');
+    expect(resolveArcoBin('', {})).toBe('vendor/bin/arco');
+    expect(resolveArcoBin('  ', { ARCO_BIN: ' ' })).toBe('vendor/bin/arco');
+    expect(resolveArcoBin(undefined, { ARCO_BIN: 'arco' })).toBe('arco');
+    expect(resolveArcoBin('bin/arco', { ARCO_BIN: 'arco' })).toBe('bin/arco');
+    expect(resolveArcoBin(' arco ')).toBe('arco');
+  });
+
+  it('runs vendor/bin/arco by default for every command', async () => {
+    const s = await session();
+    expect(await deployAndFinish(s, dep('deploy', { ...process.env, ARCO_BIN: undefined }))).toBe(0);
+    expect(spawnedFiles()).toEqual(['vendor/bin/arco', 'vendor/bin/arco', 'vendor/bin/arco']);
+  });
+
+  it('arcoBin "arco" resolves through PATH for a project without vendor/', async () => {
+    const bin = globalArco();
+    const callsFile = join(project, 'calls.txt');
+    const s = await session();
+    const env = { ...process.env, ARCO_BIN: undefined, PATH: `${bin}:${process.env.PATH}`, FAKE_ARCO_CALLS: callsFile };
+    expect(await deployAndFinish(s, { ...dep('deploy', env), arcoBin: 'arco' })).toBe(0);
+    expect(spawnedFiles()).toEqual(['arco', 'arco', 'arco']);
+    expect(readFileSync(callsFile, 'utf8').trim().split('\n')).toEqual(['deploy --env=production --yes --json', 'info --env=production --resources --json', '--version']);
+    expect(calls.at(-1)!.body).toMatchObject({ result: 'succeeded', revision: 'r42', arco_version: '0.10.0' });
+  });
+
+  it('ARCO_BIN in the environment overrides the default, including the config layer version check', async () => {
+    const bin = globalArco();
+    startExtra = { config: { schema: 1, app: 'shop', environments: { production: {} } } };
+    const s = await session();
+    expect(await deployAndFinish(s, dep('deploy', { ...process.env, ARCO_BIN: 'arco', PATH: `${bin}:${process.env.PATH}`, FAKE_ARCO_VERSION: '0.13.0' }))).toBe(0);
+    expect(new Set(spawnedFiles())).toEqual(new Set(['arco']));
+    expect(spawnedFiles()[0]).toBe('arco');
+  });
+
+  it('a bare name missing from PATH fails the run instead of falling back to vendor/bin/arco', async () => {
+    const s = await session();
+    const code = await deployAndFinish(s, { ...dep('deploy', { ...process.env, PATH: '/nonexistent' }), arcoBin: 'arco' });
+    expect(code).not.toBe(0);
+    expect(spawnedFiles().every((f) => f === 'arco')).toBe(true);
+    expect(calls.at(-1)!.body).toMatchObject({ result: 'failed', error_code: 'arco.no_result' });
   });
 });

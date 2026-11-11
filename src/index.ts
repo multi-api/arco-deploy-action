@@ -18,6 +18,7 @@ async function main(): Promise<void> {
     deploymentId: core.getInput('deployment_id', { required: true }),
     mode,
     workingDirectory: core.getInput('working-directory') || '.',
+    arcoBin: core.getInput('arco-bin'),
     mask: (s) => core.setSecret(s),
     warn: (m) => core.warning(m),
   });
