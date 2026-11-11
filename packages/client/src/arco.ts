@@ -2,7 +2,20 @@
 // `info --resources --json` document). A contract change should touch just this file.
 import { spawn } from 'node:child_process';
 
+/** The project's Composer-installed Arco: the default for Laravel apps. */
 export const ARCO_BIN = 'vendor/bin/arco';
+
+/**
+ * The Arco binary to run: `explicit` (the action's `arco-bin` input), else `env.ARCO_BIN`, else `vendor/bin/arco`.
+ * A path with a slash resolves against the project directory; a bare name such as `arco` (a global
+ * `composer global require multiapi/arco`, for apps without `vendor/`) resolves through the child's PATH.
+ */
+export function resolveArcoBin(explicit?: string | null, env: NodeJS.ProcessEnv = {}): string {
+  const fromInput = explicit?.trim();
+  if (fromInput) return fromInput;
+  const fromEnv = env.ARCO_BIN?.trim();
+  return fromEnv ? fromEnv : ARCO_BIN;
+}
 
 export type ArcoEvent = { schema: 1; type: string; [key: string]: unknown };
 
@@ -225,5 +238,6 @@ export function runCommand(file: string, args: string[], options: CommandOptions
   });
 }
 
-/** Runs `vendor/bin/arco <args>` in cwd. Never rejects. */
-export const runArco = (args: string[], options: CommandOptions): Promise<CommandResult> => runCommand(ARCO_BIN, args, options);
+/** Runs `<bin> <args>` in cwd (`bin` defaults to `vendor/bin/arco`). Never rejects. */
+export const runArco = (args: string[], options: CommandOptions, bin: string = ARCO_BIN): Promise<CommandResult> =>
+  runCommand(bin, args, options);

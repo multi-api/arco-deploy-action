@@ -1,4 +1,4 @@
-import { CloudApi, RunAbortedError, deployAndFinish, startRun } from '@multiapi/arco-cloud-client';
+import { CloudApi, RunAbortedError, deployAndFinish, resolveArcoBin, startRun } from '@multiapi/arco-cloud-client';
 
 export interface RunOptions {
   token: string;
@@ -8,6 +8,8 @@ export interface RunOptions {
   nonce: string;
   mode: string;
   workingDirectory: string;
+  /** The Arco binary (`arco-bin` input). Empty or unset: `$ARCO_BIN`, else `vendor/bin/arco`. */
+  arcoBin?: string;
   env?: NodeJS.ProcessEnv;
   mask?: (secret: string) => void;
   warn?: (message: string) => void;
@@ -45,6 +47,8 @@ export async function run(opts: RunOptions): Promise<number> {
     mode: opts.mode as 'deploy' | 'inventory',
     environment: opts.environment,
     cwd: opts.workingDirectory,
+    // Resolved against the action's own environment, so a step-level `env: ARCO_BIN` works too.
+    arcoBin: resolveArcoBin(opts.arcoBin, opts.env ?? process.env),
     // Credentials live only in the child environment; process.env is never modified.
     env: childBaseEnv(opts.env ?? process.env, [opts.token, opts.nonce].filter((v) => v.length >= 4)),
     killGraceMs: opts.killGraceMs,

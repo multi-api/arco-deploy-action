@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -303,6 +303,41 @@ describe('run', () => {
     it('inventory mode does not forward them', async () => {
       await run(opts({ mode: 'inventory', fake: { FAKE_ARCO_RESULT: JSON.stringify({ url: 'https://x.example' }) } }));
       for (const k of ['url', 'domains', 'cold_start_ms']) expect(finish()).not.toHaveProperty(k);
+    });
+  });
+  describe('arco binary', () => {
+    /** Composer's global bin dir stand-in holding `arco`; the project loses vendor/ (a Go app). */
+    const globalArco = () => {
+      const bin = mkdtempSync(join(tmpdir(), 'arco-global-'));
+      writeFileSync(join(bin, 'arco'), `#!/bin/sh\nexec node "${resolve(__dirname, '../packages/client/test/fixtures/fake-arco.mjs')}" "$@"\n`);
+      chmodSync(join(bin, 'arco'), 0o755);
+      rmSync(join(project, 'vendor'), { recursive: true });
+      return `${bin}:${process.env.PATH}`;
+    };
+    const argv = () => readFileSync(callsFile, 'utf8').trim().split('\n');
+
+    it('defaults to vendor/bin/arco', async () => {
+      expect(await run(opts({ arcoBin: '', env: { ...process.env, ARCO_BIN: undefined, FAKE_ARCO_CALLS: callsFile } }))).toBe(0);
+      expect(argv()).toContain('deploy --env=production --yes --json');
+    });
+
+    it('the arco-bin input runs a bare `arco` from PATH', async () => {
+      const PATH = globalArco();
+      expect(await run(opts({ arcoBin: 'arco', env: { ...process.env, ARCO_BIN: undefined, PATH, FAKE_ARCO_CALLS: callsFile } }))).toBe(0);
+      expect(argv()).toEqual(['deploy --env=production --yes --json', 'info --env=production --resources --json', '--version']);
+      expect(finish()).toMatchObject({ result: 'succeeded', arco_version: '0.10.0' });
+    });
+
+    it('ARCO_BIN in the action environment is used when the input is empty', async () => {
+      const PATH = globalArco();
+      expect(await run(opts({ arcoBin: '', env: { ...process.env, ARCO_BIN: 'arco', PATH, FAKE_ARCO_CALLS: callsFile } }))).toBe(0);
+      expect(argv()).toContain('deploy --env=production --yes --json');
+    });
+
+    it('the input wins over ARCO_BIN', async () => {
+      const PATH = globalArco();
+      expect(await run(opts({ arcoBin: 'arco', env: { ...process.env, ARCO_BIN: 'vendor/bin/arco', PATH, FAKE_ARCO_CALLS: callsFile } }))).toBe(0);
+      expect(finish()).toMatchObject({ result: 'succeeded' });
     });
   });
 });

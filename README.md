@@ -4,9 +4,9 @@ GitHub Action used by [Arco Cloud](https://arco.cloud) to run deployments in you
 Arco Cloud dispatches a workflow; this action:
 
 1. calls Cloud's API (`start`) to exchange a one-time nonce for temporary AWS credentials,
-2. runs `vendor/bin/arco deploy --env=<env> --json` (skipped when `mode: inventory`) with the credentials
+2. runs `<arco> deploy --env=<env> --json` (skipped when `mode: inventory`) with the credentials
    available only to that child process, streaming logs and events to Cloud,
-3. runs `vendor/bin/arco info --env=<env> --resources --json` to report the resource inventory,
+3. runs `<arco> info --env=<env> --resources --json` to report the resource inventory,
 4. reports the result (`finish`) and exits non-zero when the deployment failed.
 
 Cloud generates the workflow file for you; you normally never write this by hand.
@@ -22,7 +22,29 @@ Cloud generates the workflow file for you; you normally never write this by hand
 ```
 
 Inputs: `token`, `api-url`, `environment`, `deployment_id`, `nonce` (required); `mode` (`deploy` | `inventory`,
-default `deploy`); `working-directory` (default `.`).
+default `deploy`); `working-directory` (default `.`); `arco-bin` (default empty, see below).
+
+### Arco binary
+
+`<arco>` above is, in order: the `arco-bin` input when non-empty, else the `ARCO_BIN` environment variable when
+non-empty, else `vendor/bin/arco` (the Composer-installed Arco of a Laravel app; unchanged default). A value with a
+slash is resolved against `working-directory`; a bare name is looked up on `PATH`. Apps without `vendor/` (Go apps,
+for instance) install Arco globally and pass `arco-bin: arco`:
+
+```yaml
+- run: |
+    composer global require multiapi/arco:^0.13
+    echo "$(composer global config bin-dir --absolute)" >> "$GITHUB_PATH"
+- uses: multi-api/arco-deploy-action@v1
+  with:
+    # ...
+    arco-bin: arco
+```
+
+The same value is used for `deploy`, `info` and `--version`. A binary that cannot be started fails the run
+(`arco.no_result`); there is no fallback to `vendor/bin/arco`. In `@multiapi/arco-cloud-client` the option is
+`DeployOptions.arcoBin` (resolved by `resolveArcoBin(arcoBin, env)` with the same rules, `env` being the child's
+base environment).
 
 Requires Arco >= 0.10 (`--json` output). All Arco output parsing lives in `packages/client/src/arco.ts`.
 
