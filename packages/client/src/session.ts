@@ -238,7 +238,8 @@ export interface DeployOptions {
  */
 export async function deployAndFinish(s: RunSession, o: DeployOptions): Promise<number> {
   const bin = resolveArcoBin(o.arcoBin, o.env);
-  const awsEnv: NodeJS.ProcessEnv = { ...o.env, ...s.awsEnv };
+  // Cloud apps send no anonymous telemetry (Cloud counts them from CloudWatch); wins over an inherited value.
+  const awsEnv: NodeJS.ProcessEnv = { ...o.env, ...s.awsEnv, ARCO_TELEMETRY_DISABLE: '1' };
   const common = { cwd: o.cwd, uid: o.uid, gid: o.gid };
   const throwIfAborted = () => {
     const message = s.abortMessage();

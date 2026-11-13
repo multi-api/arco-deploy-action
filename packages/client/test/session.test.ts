@@ -80,6 +80,17 @@ describe('startRun + deployAndFinish', () => {
     }
   });
 
+  it('runs every arco process with ARCO_TELEMETRY_DISABLE=1, over an inherited 0', async () => {
+    startExtra = { config: { schema: 1, app: 'shop', environments: {} } }; // a layer adds the early --version check
+    for (const mode of ['deploy', 'inventory'] as const) {
+      const dump = join(project, `telemetry-${mode}.json`);
+      const s = await session();
+      await deployAndFinish(s, dep(mode, { ...process.env, ARCO_TELEMETRY_DISABLE: '0', FAKE_ARCO_VERSION: '0.13.0', FAKE_ARCO_ENVDUMP: dump }));
+      const cmds = mode === 'deploy' ? ['--version', 'deploy', 'info'] : ['--version', 'info'];
+      for (const cmd of cmds) expect(JSON.parse(readFileSync(`${dump}.${cmd}`, 'utf8')).ARCO_TELEMETRY_DISABLE, `${mode} ${cmd}`).toBe('1');
+    }
+  });
+
   it('passes uid and gid to spawn', async () => {
     const s = await session();
     await deployAndFinish(s, { ...dep('inventory', { ...process.env }), uid: process.getuid!(), gid: process.getgid!() });
