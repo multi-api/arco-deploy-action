@@ -24,6 +24,8 @@ Cloud generates the workflow file for you; you normally never write this by hand
 Inputs: `token`, `api-url`, `environment`, `deployment_id`, `nonce` (required); `mode` (`deploy` | `inventory`,
 default `deploy`); `working-directory` (default `.`); `arco-bin` (default empty, see below).
 
+Every `arco` process runs with `ARCO_TELEMETRY_DISABLE=1`: Cloud deploys turn Arco's anonymous telemetry off.
+
 ### Arco binary
 
 `<arco>` above is, in order: the `arco-bin` input when non-empty, else the `ARCO_BIN` environment variable when
