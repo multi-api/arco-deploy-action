@@ -26,8 +26,21 @@ export interface ArcoResult extends ArcoEvent {
   url?: unknown;
   domains?: unknown;
   cold_start_ms?: unknown;
+  cold_start_deferred?: unknown;
   rolled_back?: boolean;
   error?: { key?: string; message?: string } | null;
+}
+
+export interface ColdStartDeferred {
+  log_group: string;
+  since_ms: number;
+  stream_prefixes: string[];
+}
+
+function isColdStartDeferred(v: unknown): v is ColdStartDeferred {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return false;
+  const { log_group: g, since_ms: s, stream_prefixes: p } = v as Record<string, unknown>;
+  return typeof g === 'string' && g !== '' && typeof s === 'number' && Number.isInteger(s) && s >= 0 && Array.isArray(p) && p.every((x) => typeof x === 'string');
 }
 
 export interface FinishPayload {
@@ -42,6 +55,8 @@ export interface FinishPayload {
   url?: string | null;
   domains?: string[] | null;
   cold_start_ms?: number | null;
+  /** Where Arco Cloud can read the cold start from, when Arco deferred it (ARCO_DEFER_COLD_START=1). */
+  cold_start_deferred?: ColdStartDeferred | null;
 }
 
 // --json never prompts: a dispatch from Cloud is already user-confirmed, so always pass --yes
@@ -112,6 +127,9 @@ export function toFinishPayload(
     const { url, domains, cold_start_ms: coldStartMs } = result;
     if (url === null || typeof url === 'string') payload.url = url;
     if (domains === null || (Array.isArray(domains) && domains.every((d) => typeof d === 'string'))) payload.domains = domains as string[] | null;
+    if (result.cold_start_deferred === null || isColdStartDeferred(result.cold_start_deferred)) {
+      payload.cold_start_deferred = result.cold_start_deferred === null ? null : { log_group: result.cold_start_deferred.log_group, since_ms: result.cold_start_deferred.since_ms, stream_prefixes: result.cold_start_deferred.stream_prefixes };
+    }
     if (coldStartMs === null || (typeof coldStartMs === 'number' && Number.isFinite(coldStartMs))) payload.cold_start_ms = coldStartMs;
   }
   if (inventory !== null) payload.inventory = inventory;

@@ -38,7 +38,7 @@ function isRefused(e: unknown): e is CloudApiError {
 }
 
 /** The optional fields a Cloud may refuse; the result itself never depends on them. */
-const OPTIONAL_FIELDS = ['url', 'domains', 'cold_start_ms', 'inventory'] as const;
+const OPTIONAL_FIELDS = ['url', 'domains', 'cold_start_ms', 'cold_start_deferred', 'inventory'] as const;
 
 /**
  * Reports the result, retrying network errors and 5xx. A refused report (4xx) is not sent again
@@ -316,8 +316,11 @@ export async function deployAndFinish(s: RunSession, o: DeployOptions): Promise<
 async function runAndFinish(s: RunSession, o: DeployOptions, bin: string, childEnv: NodeJS.ProcessEnv, knownVersion: string | null): Promise<number> {
   // Only deploys get the boundary (not inventory, info or --version), and only when Cloud sent a non-empty string.
   const boundary = s.started.permissionsBoundary;
+  // Deploys also skip the cold-start wait (Arco Cloud reads it later); older arco versions ignore the variable.
   const deployEnv: NodeJS.ProcessEnv =
-    o.mode === 'deploy' && typeof boundary === 'string' && boundary !== '' ? { ...childEnv, ARCO_PERMISSIONS_BOUNDARY: boundary } : childEnv;
+    o.mode === 'deploy'
+      ? { ...childEnv, ARCO_DEFER_COLD_START: '1', ...(typeof boundary === 'string' && boundary !== '' ? { ARCO_PERMISSIONS_BOUNDARY: boundary } : {}) }
+      : childEnv;
   const common = { cwd: o.cwd, uid: o.uid, gid: o.gid };
   const throwIfAborted = () => {
     const message = s.abortMessage();

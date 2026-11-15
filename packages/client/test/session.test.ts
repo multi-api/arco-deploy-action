@@ -80,6 +80,50 @@ describe('startRun + deployAndFinish', () => {
     }
   });
 
+  it('sets ARCO_DEFER_COLD_START=1 for arco deploy only', async () => {
+    const dump = join(project, 'env.json');
+    const s = await session();
+    await deployAndFinish(s, dep('deploy', { ...process.env, FAKE_ARCO_ENVDUMP: dump }));
+    expect(JSON.parse(readFileSync(`${dump}.deploy`, 'utf8')).ARCO_DEFER_COLD_START).toBe('1');
+    for (const cmd of ['info', '--version']) expect(JSON.parse(readFileSync(`${dump}.${cmd}`, 'utf8'))).not.toHaveProperty('ARCO_DEFER_COLD_START');
+  });
+
+  it('sets no ARCO_DEFER_COLD_START in inventory mode', async () => {
+    const dump = join(project, 'env.json');
+    const s = await session();
+    await deployAndFinish(s, dep('inventory', { ...process.env, FAKE_ARCO_ENVDUMP: dump }));
+    for (const cmd of ['info', '--version']) {
+      if (existsSync(`${dump}.${cmd}`)) expect(JSON.parse(readFileSync(`${dump}.${cmd}`, 'utf8'))).not.toHaveProperty('ARCO_DEFER_COLD_START');
+    }
+  });
+
+  it('finish forwards a well-formed cold_start_deferred, and null as null', async () => {
+    const deferred = { log_group: '/aws/lambda/shop', since_ms: 1700000000000, stream_prefixes: ['2026/11/15/[$LATEST]'] };
+    await deployAndFinish(await session(), dep('deploy', { ...process.env, FAKE_ARCO_RESULT: JSON.stringify({ cold_start_ms: null, cold_start_deferred: deferred }) }));
+    expect(calls.at(-1)!.body.cold_start_deferred).toEqual(deferred);
+    calls.length = 0;
+    await deployAndFinish(await session(), dep('deploy', { ...process.env, FAKE_ARCO_RESULT: JSON.stringify({ cold_start_deferred: null }) }));
+    expect(calls.at(-1)!.body).toHaveProperty('cold_start_deferred', null);
+  });
+
+  it('finish drops a malformed cold_start_deferred', async () => {
+    const bad: unknown[] = [
+      { log_group: '/g', since_ms: 'x', stream_prefixes: [] },
+      { log_group: '/g', since_ms: 1, stream_prefixes: [1] },
+      { log_group: '', since_ms: 1, stream_prefixes: [] },
+      { log_group: '/g', since_ms: -1, stream_prefixes: [] },
+      { log_group: '/g', since_ms: 1.5, stream_prefixes: [] },
+      { log_group: '/g', since_ms: 1 },
+      'nope',
+      [],
+    ];
+    for (const value of bad) {
+      calls.length = 0;
+      await deployAndFinish(await session(), dep('deploy', { ...process.env, FAKE_ARCO_RESULT: JSON.stringify({ cold_start_deferred: value }) }));
+      expect(calls.at(-1)!.body, JSON.stringify(value)).not.toHaveProperty('cold_start_deferred');
+    }
+  });
+
   it('runs every arco process with ARCO_TELEMETRY_DISABLE=1, over an inherited 0', async () => {
     startExtra = { config: { schema: 1, app: 'shop', environments: {} } }; // a layer adds the early --version check
     for (const mode of ['deploy', 'inventory'] as const) {
