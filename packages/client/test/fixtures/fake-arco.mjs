@@ -3,6 +3,7 @@
 //   FAKE_ARCO_SCENARIO = deployed (default) | failed | refused | leakyfail | crash | opterror
 //   (deploy scenarios hang | stubborn block until killed; stubborn ignores SIGTERM; both append `pid` to FAKE_ARCO_CALLS)
 //   FAKE_ARCO_ENVDUMP  = file to write the child's environment (JSON) to
+//   FAKE_ARCO_REMOVE   = removed (default) | kept (kept resources + role kept for interfaces) | leftovers | crash   (the `remove` command)
 //   FAKE_ARCO_INFO     = ok (default) | bad | fail
 //   FAKE_ARCO_CALLS    = file to append each invocation's argv to
 //   FAKE_ARCO_VERSION  = hang: `--version` blocks until killed; fail: exits 1; anything else: the version printed (default 0.10.0)
@@ -79,6 +80,23 @@ if (args[0] === '--version') {
   const merged = { ...base, ...over };
   for (const k of Object.keys(merged)) if (merged[k] === '__absent__') delete merged[k];
   emit(merged);
+} else if (args[0] === 'remove') {
+  const mode = process.env.FAKE_ARCO_REMOVE ?? 'removed';
+  const base = { type: 'result', app: 'shop', environment: 'production', revision: null, url: null, domains: [], rolled_back: false, cold_start_ms: null };
+  console.log('plain line before events');
+  emit({ type: 'step', key: 'remove.resources', status: 'note', params: {} });
+  emit({ type: 'step', key: 'remove.resource_deleted', status: 'note', params: { type: 'function', name: 'shop-production' } });
+  if (mode === 'crash') process.exit(2);
+  if (mode === 'kept') {
+    emit({ type: 'step', key: 'remove.resource_kept', status: 'note', params: { type: 'bucket', name: 'shop-uploads' } });
+    emit({ type: 'step', key: 'remove.role_kept_for_interfaces', status: 'note', params: { role: 'arco-shop-production', region: 'us-east-1', functions: 'shop-production-console, shop-production-queue-*' } });
+  }
+  if (mode === 'leftovers') {
+    emit({ type: 'step', key: 'remove.resource_kept', status: 'note', params: { type: 'queue', name: 'jobs' } });
+    emit({ ...base, outcome: 'failed', error: { key: 'remove.leftovers', message: `Something was left: denied for ${process.env.AWS_SECRET_ACCESS_KEY}`, params: { resources: 'queue jobs' } } });
+    process.exit(1);
+  }
+  emit({ ...base, outcome: 'removed', error: null });
 } else if (args[0] === 'info') {
   const mode = process.env.FAKE_ARCO_INFO ?? 'ok';
   if (mode === 'fail') process.exit(1);

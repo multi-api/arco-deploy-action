@@ -53,7 +53,60 @@ beforeEach(() => {
 
 const session = (extraSecrets: string[] = []) =>
   startRun({ api: new CloudApi('https://cloud.test', 'bearer-token-abcdef', 'dep_1'), nonce: 'nonce-123456', token: 'bearer-token-abcdef', extraSecrets, batcher: { sleep: async () => {} } });
-const dep = (mode: 'deploy' | 'inventory', env: NodeJS.ProcessEnv) => ({ mode, environment: 'production', cwd: project, env });
+const dep = (mode: 'deploy' | 'inventory' | 'remove', env: NodeJS.ProcessEnv) => ({ mode, environment: 'production', cwd: project, env });
+
+describe('remove mode', () => {
+  const run = async (extra: NodeJS.ProcessEnv = {}) => deployAndFinish(await session(), dep('remove', { ...process.env, ...extra }));
+
+  it('remove mode runs arco remove with --yes --json --no-wait-interfaces', async () => {
+    const callsFile = join(project, 'calls.txt');
+    const dump = join(project, 'env.json');
+    startExtra = { mode: 'remove', config: { schema: 1, app: 'shop', environments: {} } };
+    const code = await run({ FAKE_ARCO_CALLS: callsFile, FAKE_ARCO_ENVDUMP: dump, FAKE_ARCO_VERSION: '0.13.0' });
+    expect(code).toBe(0);
+    const argv = readFileSync(callsFile, 'utf8').split('\n').filter((l) => !l.startsWith('layer '));
+    expect(argv).toContain('remove --env=production --yes --json --no-wait-interfaces');
+    expect(argv.some((l) => l.startsWith('deploy') || l.startsWith('info'))).toBe(false);
+    const env = JSON.parse(readFileSync(`${dump}.remove`, 'utf8'));
+    expect(env).toMatchObject({ AWS_ACCESS_KEY_ID: 'AKIAEXAMPLE12345', ARCO_TELEMETRY_DISABLE: '1' });
+    expect(env.ARCO_CONFIG_LAYER).toBeTruthy();
+    expect(env).not.toHaveProperty('ARCO_PERMISSIONS_BOUNDARY');
+    expect(env).not.toHaveProperty('ARCO_DEFER_COLD_START');
+    const events = calls.filter((c) => c.path === 'logs').flatMap((c) => c.body.events);
+    expect(events.map((e: any) => e.key)).toEqual(expect.arrayContaining(['remove.resources', 'remove.resource_deleted']));
+    expect(events.at(-1)).toMatchObject({ type: 'result', outcome: 'removed' });
+    expect(calls.at(-1)!.path).toBe('finish');
+  });
+
+  it('remove finish carries removed and kept notes', async () => {
+    expect(await run({ FAKE_ARCO_REMOVE: 'kept' })).toBe(0);
+    const body = calls.at(-1)!.body;
+    expect(body).toMatchObject({ result: 'removed', error_code: null, error_message: null, arco_version: '0.10.0' });
+    expect(body.notes).toEqual([
+      { type: 'bucket', name: 'shop-uploads' },
+      { key: 'remove.role_kept_for_interfaces', role: 'arco-shop-production', region: 'us-east-1', functions: 'shop-production-console, shop-production-queue-*' },
+    ]);
+  });
+
+  it('remove without kept resources sends an empty notes list', async () => {
+    expect(await run()).toBe(0);
+    expect(calls.at(-1)!.body).toMatchObject({ result: 'removed', notes: [] });
+  });
+
+  it('remove failure finishes failed with the error key', async () => {
+    expect(await run({ FAKE_ARCO_REMOVE: 'leftovers' })).toBe(1);
+    const body = calls.at(-1)!.body;
+    expect(body).toMatchObject({ result: 'failed', error_code: 'remove.leftovers' });
+    expect(body.error_message).toContain('Something was left');
+    expect(JSON.stringify(body)).not.toContain(SECRET);
+    expect(body.notes).toEqual([{ type: 'queue', name: 'jobs' }]);
+  });
+
+  it('remove that crashes without a result finishes failed', async () => {
+    expect(await run({ FAKE_ARCO_REMOVE: 'crash' })).toBe(2);
+    expect(calls.at(-1)!.body).toMatchObject({ result: 'failed', error_code: 'arco.no_result' });
+  });
+});
 
 describe('startRun + deployAndFinish', () => {
   it('posts start, logs and finish in that order', async () => {

@@ -43,8 +43,13 @@ function isColdStartDeferred(v: unknown): v is ColdStartDeferred {
   return typeof g === 'string' && g !== '' && typeof s === 'number' && Number.isInteger(s) && s >= 0 && Array.isArray(p) && p.every((x) => typeof x === 'string');
 }
 
+/** What a remove leaves behind: a kept resource, or the execution role kept on purpose for Lambda VPC interfaces. */
+export type RemoveNote =
+  | { type: string; name: string }
+  | { key: 'remove.role_kept_for_interfaces'; role: string; region: string; functions: string };
+
 export interface FinishPayload {
-  result: 'succeeded' | 'failed';
+  result: 'succeeded' | 'removed' | 'failed';
   revision: string | null;
   rolled_back: boolean;
   error_code: string | null;
@@ -57,11 +62,14 @@ export interface FinishPayload {
   cold_start_ms?: number | null;
   /** Where Arco Cloud can read the cold start from, when Arco deferred it (ARCO_DEFER_COLD_START=1). */
   cold_start_deferred?: ColdStartDeferred | null;
+  /** Remove mode only: the resources Arco kept and, when it applies, the role kept for the interfaces. */
+  notes?: RemoveNote[];
 }
 
 // --json never prompts: a dispatch from Cloud is already user-confirmed, so always pass --yes
 // (otherwise a first deploy of an environment is `refused` with deploy.confirm_required).
 export const deployArgs = (environment: string, extra: string[] = []): string[] => ['deploy', `--env=${environment}`, '--yes', '--json', ...extra];
+export const removeArgs = (environment: string): string[] => ['remove', `--env=${environment}`, '--yes', '--json', '--no-wait-interfaces'];
 export const infoArgs = (environment: string): string[] => ['info', `--env=${environment}`, '--resources', '--json'];
 export const versionArgs = (): string[] => ['--version'];
 
@@ -134,6 +142,31 @@ export function toFinishPayload(
   }
   if (inventory !== null) payload.inventory = inventory;
   return payload;
+}
+
+/** The `remove.resource_kept` and `remove.role_kept_for_interfaces` notes of an event, as finish notes; null for any other event. */
+export function removeNoteOf(event: ArcoEvent): RemoveNote | null {
+  if (event.type !== 'step' || event.status !== 'note') return null;
+  const params = event.params;
+  if (typeof params !== 'object' || params === null || Array.isArray(params)) return null;
+  const p = params as Record<string, unknown>;
+  if (event.key === 'remove.resource_kept' && typeof p.type === 'string' && typeof p.name === 'string') return { type: p.type, name: p.name };
+  if (event.key === 'remove.role_kept_for_interfaces' && typeof p.role === 'string' && typeof p.region === 'string' && typeof p.functions === 'string') {
+    return { key: 'remove.role_kept_for_interfaces', role: p.role, region: p.region, functions: p.functions };
+  }
+  return null;
+}
+
+/** The finish payload of `arco remove`: removed only when Arco says so and exits 0. */
+export function toRemovePayload(result: ArcoResult | null, exitCode: number, arcoVersion: string | null, notes: RemoveNote[]): FinishPayload {
+  const removed = result !== null && result.outcome === 'removed' && exitCode === 0;
+  let errorCode: string | null = result?.error?.key ?? null;
+  let errorMessage: string | null = result?.error?.message ?? null;
+  if (!removed && errorCode === null) {
+    errorCode = result ? `remove.${result.outcome}` : 'arco.no_result';
+    errorMessage = errorMessage ?? (result ? `Remove ${result.outcome}` : `Arco exited with code ${exitCode} without a result document`);
+  }
+  return { result: removed ? 'removed' : 'failed', revision: null, rolled_back: false, error_code: errorCode, error_message: errorMessage, arco_version: arcoVersion, notes };
 }
 
 export interface CommandResult {

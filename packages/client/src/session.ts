@@ -11,12 +11,16 @@ import {
   parseEventLine,
   parseInventory,
   parseVersion,
+  removeArgs,
+  removeNoteOf,
   resolveArcoBin,
   runArco,
   toFinishPayload,
+  toRemovePayload,
   versionArgs,
   type ArcoResult,
   type FinishPayload,
+  type RemoveNote,
 } from './arco.js';
 
 /** Cloud revoked this run (lease lost, finished, or not the runner): arco was stopped and nothing more is reported. */
@@ -38,7 +42,7 @@ function isRefused(e: unknown): e is CloudApiError {
 }
 
 /** The optional fields a Cloud may refuse; the result itself never depends on them. */
-const OPTIONAL_FIELDS = ['url', 'domains', 'cold_start_ms', 'cold_start_deferred', 'inventory'] as const;
+const OPTIONAL_FIELDS = ['url', 'domains', 'cold_start_ms', 'cold_start_deferred', 'inventory', 'notes'] as const;
 
 /**
  * Reports the result, retrying network errors and 5xx. A refused report (4xx) is not sent again
@@ -211,7 +215,7 @@ export async function startRun(o: StartRunOptions): Promise<RunSession> {
 }
 
 export interface DeployOptions {
-  mode: 'deploy' | 'inventory';
+  mode: 'deploy' | 'inventory' | 'remove';
   environment: string;
   cwd: string;
   /** Base environment of the child; the AWS_* variables are added on top. */
@@ -314,7 +318,7 @@ export async function deployAndFinish(s: RunSession, o: DeployOptions): Promise<
 }
 
 async function runAndFinish(s: RunSession, o: DeployOptions, bin: string, childEnv: NodeJS.ProcessEnv, knownVersion: string | null): Promise<number> {
-  // Only deploys get the boundary (not inventory, info or --version), and only when Cloud sent a non-empty string.
+  // Only deploys get the boundary (not remove, inventory, info or --version), and only when Cloud sent a non-empty string.
   const boundary = s.started.permissionsBoundary;
   // Deploys also skip the cold-start wait (Arco Cloud reads it later); older arco versions ignore the variable.
   const deployEnv: NodeJS.ProcessEnv =
@@ -330,7 +334,30 @@ async function runAndFinish(s: RunSession, o: DeployOptions, bin: string, childE
   let exitCode = 0;
   let result: ArcoResult | null = null;
 
-  if (o.mode === 'deploy') {
+  const notes: RemoveNote[] = [];
+
+  if (o.mode === 'remove') {
+    // Same stream as deploy; the layer is already in childEnv, and there is no boundary, DNS profile or deferred cold start.
+    const remove = await runArco(removeArgs(o.environment), {
+      ...common,
+      env: childEnv,
+      signal: s.signal,
+      killGraceMs: o.killGraceMs,
+      onStdoutLine: (line) => {
+        const event = parseEventLine(line);
+        if (event) {
+          s.batcher.addEvent(event);
+          if (isResult(event)) result = event;
+          const note = removeNoteOf(event);
+          if (note) notes.push(note);
+        } else {
+          s.batcher.addLine(line);
+        }
+      },
+      onStderrLine: (line) => s.batcher.addLine(line),
+    }, bin);
+    exitCode = remove.exitCode;
+  } else if (o.mode === 'deploy') {
     // Only the deploy child gets the DNS profile file, --dns-profile and CLOUDFLARE_API_TOKEN; the file is removed
     // however arco ends (success, non-zero exit, or stopped because Cloud revoked the run).
     let dns: Awaited<ReturnType<typeof withExternalDns>>;
@@ -370,15 +397,19 @@ async function runAndFinish(s: RunSession, o: DeployOptions, bin: string, childE
   await s.batcher.flush();
   throwIfAborted();
 
-  const info = await runArco(infoArgs(o.environment), {
-    ...common,
-    env: childEnv,
-    signal: s.signal,
-    killGraceMs: o.killGraceMs,
-    onStderrLine: (line) => s.batcher.addLine(line),
-  }, bin);
-  const inventory = info.exitCode === 0 ? parseInventory(info.stdout) : null;
-  if (inventory === null) s.batcher.addLine('Could not collect the resource inventory.');
+  // Nothing is left to inventory after a remove.
+  let inventory: unknown | null = null;
+  if (o.mode !== 'remove') {
+    const info = await runArco(infoArgs(o.environment), {
+      ...common,
+      env: childEnv,
+      signal: s.signal,
+      killGraceMs: o.killGraceMs,
+      onStderrLine: (line) => s.batcher.addLine(line),
+    }, bin);
+    inventory = info.exitCode === 0 ? parseInventory(info.stdout) : null;
+    if (inventory === null) s.batcher.addLine('Could not collect the resource inventory.');
+  }
 
   let arcoVersion = knownVersion;
   if (arcoVersion === null) {
@@ -390,7 +421,9 @@ async function runAndFinish(s: RunSession, o: DeployOptions, bin: string, childE
   throwIfAborted();
 
   const rawPayload: FinishPayload =
-    o.mode === 'deploy'
+    o.mode === 'remove'
+      ? toRemovePayload(result, exitCode, arcoVersion, notes)
+      : o.mode === 'deploy'
       ? toFinishPayload(result, exitCode, arcoVersion, inventory)
       : inventory !== null
         ? { result: 'succeeded', revision: null, rolled_back: false, error_code: null, error_message: null, arco_version: arcoVersion, inventory }
@@ -402,6 +435,6 @@ async function runAndFinish(s: RunSession, o: DeployOptions, bin: string, childE
 
   await finishWithRetry(s.api, payload, s.sleep, s.warn);
 
-  if (payload.result === 'succeeded') return 0;
-  return o.mode === 'deploy' ? exitCode || 1 : 1;
+  if (payload.result === 'succeeded' || payload.result === 'removed') return 0;
+  return o.mode === 'inventory' ? 1 : exitCode || 1;
 }
