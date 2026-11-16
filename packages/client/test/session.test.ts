@@ -100,6 +100,28 @@ describe('remove mode', () => {
     expect(body.error_message).toContain('Something was left');
     expect(JSON.stringify(body)).not.toContain(SECRET);
     expect(body.notes).toEqual([{ type: 'queue', name: 'jobs' }]);
+    expect(body.error_params).toMatchObject({ resources: 'lambda:function shop-production-console, iam:role arco-shop-production-network', count: 2 });
+    expect(body.error_params).not.toHaveProperty('nested');
+  });
+
+  it('remove error_params are redacted', async () => {
+    await run({ FAKE_ARCO_REMOVE: 'leftovers' });
+    const body = calls.at(-1)!.body;
+    expect(body.error_params.detail).not.toContain(SECRET);
+    expect(JSON.stringify(body)).not.toContain(SECRET);
+  });
+
+  it('error_params are dropped when Cloud refuses the report', async () => {
+    const bodies: any[] = [];
+    const api = { finish: async (b: any) => { bodies.push(b); if ('error_params' in b) throw new CloudApiError('invalid', 422, null); } } as unknown as CloudApi;
+    await finishWithRetry(api, { result: 'failed', error_code: 'remove.leftovers', error_params: { resources: 'a' } }, async () => {}, () => {});
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).not.toHaveProperty('error_params');
+  });
+
+  it('remove refused without an error key finishes failed as remove.refused', async () => {
+    expect(await run({ FAKE_ARCO_REMOVE: 'refused' })).toBe(1);
+    expect(calls.at(-1)!.body).toMatchObject({ result: 'failed', error_code: 'remove.refused', error_message: 'Remove refused' });
   });
 
   it('remove that crashes without a result finishes failed', async () => {

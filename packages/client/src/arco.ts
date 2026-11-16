@@ -28,7 +28,7 @@ export interface ArcoResult extends ArcoEvent {
   cold_start_ms?: unknown;
   cold_start_deferred?: unknown;
   rolled_back?: boolean;
-  error?: { key?: string; message?: string } | null;
+  error?: { key?: string; message?: string; params?: unknown } | null;
 }
 
 export interface ColdStartDeferred {
@@ -64,6 +64,8 @@ export interface FinishPayload {
   cold_start_deferred?: ColdStartDeferred | null;
   /** Remove mode only: the resources Arco kept and, when it applies, the role kept for the interfaces. */
   notes?: RemoveNote[];
+  /** Remove mode only: the error's `params` (string and number values), e.g. `resources` of `remove.leftovers`. */
+  error_params?: Record<string, string | number>;
 }
 
 // --json never prompts: a dispatch from Cloud is already user-confirmed, so always pass --yes
@@ -166,7 +168,13 @@ export function toRemovePayload(result: ArcoResult | null, exitCode: number, arc
     errorCode = result ? `remove.${result.outcome}` : 'arco.no_result';
     errorMessage = errorMessage ?? (result ? `Remove ${result.outcome}` : `Arco exited with code ${exitCode} without a result document`);
   }
-  return { result: removed ? 'removed' : 'failed', revision: null, rolled_back: false, error_code: errorCode, error_message: errorMessage, arco_version: arcoVersion, notes };
+  const payload: FinishPayload = { result: removed ? 'removed' : 'failed', revision: null, rolled_back: false, error_code: errorCode, error_message: errorMessage, arco_version: arcoVersion, notes };
+  const params = result?.error?.params;
+  if (!removed && typeof params === 'object' && params !== null && !Array.isArray(params)) {
+    const kept = Object.entries(params).filter((e): e is [string, string | number] => typeof e[1] === 'string' || (typeof e[1] === 'number' && Number.isFinite(e[1])));
+    if (kept.length > 0) payload.error_params = Object.fromEntries(kept);
+  }
+  return payload;
 }
 
 export interface CommandResult {

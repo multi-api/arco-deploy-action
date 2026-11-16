@@ -42,7 +42,7 @@ function isRefused(e: unknown): e is CloudApiError {
 }
 
 /** The optional fields a Cloud may refuse; the result itself never depends on them. */
-const OPTIONAL_FIELDS = ['url', 'domains', 'cold_start_ms', 'cold_start_deferred', 'inventory', 'notes'] as const;
+const OPTIONAL_FIELDS = ['url', 'domains', 'cold_start_ms', 'cold_start_deferred', 'inventory', 'notes', 'error_params'] as const;
 
 /**
  * Reports the result, retrying network errors and 5xx. A refused report (4xx) is not sent again

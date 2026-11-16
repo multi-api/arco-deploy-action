@@ -3,7 +3,7 @@
 //   FAKE_ARCO_SCENARIO = deployed (default) | failed | refused | leakyfail | crash | opterror
 //   (deploy scenarios hang | stubborn block until killed; stubborn ignores SIGTERM; both append `pid` to FAKE_ARCO_CALLS)
 //   FAKE_ARCO_ENVDUMP  = file to write the child's environment (JSON) to
-//   FAKE_ARCO_REMOVE   = removed (default) | kept (kept resources + role kept for interfaces) | leftovers | crash   (the `remove` command)
+//   FAKE_ARCO_REMOVE   = removed (default) | kept (kept resources + role kept for interfaces) | leftovers | refused | crash   (the `remove` command)
 //   FAKE_ARCO_INFO     = ok (default) | bad | fail
 //   FAKE_ARCO_CALLS    = file to append each invocation's argv to
 //   FAKE_ARCO_VERSION  = hang: `--version` blocks until killed; fail: exits 1; anything else: the version printed (default 0.10.0)
@@ -91,9 +91,13 @@ if (args[0] === '--version') {
     emit({ type: 'step', key: 'remove.resource_kept', status: 'note', params: { type: 'bucket', name: 'shop-uploads' } });
     emit({ type: 'step', key: 'remove.role_kept_for_interfaces', status: 'note', params: { role: 'arco-shop-production', region: 'us-east-1', functions: 'shop-production-console, shop-production-queue-*' } });
   }
+  if (mode === 'refused') {
+    emit({ ...base, outcome: 'refused', error: null });
+    process.exit(1);
+  }
   if (mode === 'leftovers') {
     emit({ type: 'step', key: 'remove.resource_kept', status: 'note', params: { type: 'queue', name: 'jobs' } });
-    emit({ ...base, outcome: 'failed', error: { key: 'remove.leftovers', message: `Something was left: denied for ${process.env.AWS_SECRET_ACCESS_KEY}`, params: { resources: 'queue jobs' } } });
+    emit({ ...base, outcome: 'failed', error: { key: 'remove.leftovers', message: `Something was left: denied for ${process.env.AWS_SECRET_ACCESS_KEY}`, params: { resources: 'lambda:function shop-production-console, iam:role arco-shop-production-network', detail: `denied for ${process.env.AWS_SECRET_ACCESS_KEY}`, count: 2, nested: { x: 1 } } } });
     process.exit(1);
   }
   emit({ ...base, outcome: 'removed', error: null });
