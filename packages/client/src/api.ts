@@ -24,7 +24,15 @@ export interface StartResponse {
   config?: ConfigLayer | null;
   /** Arco Cloud extensions to place under `.arco-cloud/<key>/` before deploying; null/absent when none and from older Cloud. */
   extensions?: Record<string, Extension> | null;
+  /**
+   * Remove runs only: `{force: true}` on the one Remove run allowed to delete the environment's customer (tenant)
+   * domains; absent on every other run. `--force` is passed to `arco remove` only when `force` is exactly `true`.
+   */
+  remove?: { force?: unknown } | null;
 }
+
+/** What this client advertises at `start`. */
+export const CAPABILITIES: readonly string[] = ['external_dns', 'extensions', 'tenant_domains'];
 
 export interface LogsPayload {
   seq: number;
@@ -109,9 +117,10 @@ export class CloudApi {
   }
 
   async start(nonce: string): Promise<StartResponse> {
-    // `capabilities` tells Cloud this client can apply external DNS and inject extensions, and `supports_config_layer`
-    // that it hands Arco the config layer; without them Cloud refuses runs that need them.
-    return (await this.post('start', { nonce, capabilities: ['external_dns', 'extensions'], supports_config_layer: true }, true)) as StartResponse;
+    // `capabilities` tells Cloud this client can apply external DNS, inject extensions and handle tenant domains
+    // (`--force` on `arco remove` only when `remove.force` says so, and the `tenants_restore` mode), and
+    // `supports_config_layer` that it hands Arco the config layer; without them Cloud refuses runs that need them.
+    return (await this.post('start', { nonce, capabilities: CAPABILITIES, supports_config_layer: true }, true)) as StartResponse;
   }
 
   async logs(payload: LogsPayload): Promise<void> {

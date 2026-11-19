@@ -11,7 +11,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { ARCO_BIN, CloudApi, CloudApiError, buildFailure, deployAndFinish, finishWithRetry, resolveArcoBin, startRun } from '../src/index.js';
+import { ARCO_BIN, CloudApi, CloudApiError, buildFailure, deployAndFinish, finishWithRetry, isForcedRemove, resolveArcoBin, startRun } from '../src/index.js';
 import { sha256, tarball } from './helpers/tarball.js';
 
 const SECRET = 'SECRETKEY1234567890abcdef';
@@ -53,7 +53,7 @@ beforeEach(() => {
 
 const session = (extraSecrets: string[] = []) =>
   startRun({ api: new CloudApi('https://cloud.test', 'bearer-token-abcdef', 'dep_1'), nonce: 'nonce-123456', token: 'bearer-token-abcdef', extraSecrets, batcher: { sleep: async () => {} } });
-const dep = (mode: 'deploy' | 'inventory' | 'remove', env: NodeJS.ProcessEnv) => ({ mode, environment: 'production', cwd: project, env });
+const dep = (mode: 'deploy' | 'inventory' | 'remove' | 'tenants_restore', env: NodeJS.ProcessEnv) => ({ mode, environment: 'production', cwd: project, env });
 
 describe('remove mode', () => {
   const run = async (extra: NodeJS.ProcessEnv = {}) => deployAndFinish(await session(), dep('remove', { ...process.env, ...extra }));
@@ -127,6 +127,178 @@ describe('remove mode', () => {
   it('remove that crashes without a result finishes failed', async () => {
     expect(await run({ FAKE_ARCO_REMOVE: 'crash' })).toBe(2);
     expect(calls.at(-1)!.body).toMatchObject({ result: 'failed', error_code: 'arco.no_result' });
+  });
+});
+
+describe('tenant domains capability', () => {
+  it('advertises tenant_domains next to external_dns and extensions', async () => {
+    await session();
+    expect(calls[0]!.path).toBe('start');
+    expect(calls[0]!.body.capabilities).toEqual(['external_dns', 'extensions', 'tenant_domains']);
+  });
+});
+
+describe('forced remove', () => {
+  const removeLine = (callsFile: string) => readFileSync(callsFile, 'utf8').split('\n').filter((l) => l.startsWith('remove '));
+  const runRemove = async (remove: unknown, extra: NodeJS.ProcessEnv = {}, mode: 'remove' | 'deploy' | 'tenants_restore' = 'remove') => {
+    const callsFile = join(project, 'calls.txt');
+    startExtra = { mode, ...(remove === undefined ? {} : { remove }) };
+    await deployAndFinish(await session(), dep(mode, { ...process.env, FAKE_ARCO_CALLS: callsFile, ...extra }));
+    return callsFile;
+  };
+
+  it('passes no --force without a remove key', async () => {
+    expect(removeLine(await runRemove(undefined))).toEqual(['remove --env=production --yes --json --no-wait-interfaces']);
+  });
+
+  it.each([
+    ['force false', { force: false }],
+    ['force "true"', { force: 'true' }],
+    ['force 1', { force: 1 }],
+    ['force null', { force: null }],
+    ['an empty object', {}],
+    ['remove null', null],
+    ['remove true', true],
+    ['remove "force"', 'force'],
+    ['a list', [{ force: true }]],
+  ])('passes no --force for %s', async (_label, remove) => {
+    expect(removeLine(await runRemove(remove))).toEqual(['remove --env=production --yes --json --no-wait-interfaces']);
+  });
+
+  it('appends --force exactly once when remove.force is true', async () => {
+    const lines = removeLine(await runRemove({ force: true }));
+    expect(lines).toEqual(['remove --env=production --yes --json --no-wait-interfaces --force']);
+    expect(lines[0]!.split(' ').filter((a) => a === '--force')).toHaveLength(1);
+  });
+
+  it('nothing in the environment turns --force on', async () => {
+    const lines = removeLine(await runRemove(undefined, { ARCO_FORCE: '1', ARCO_REMOVE_FORCE: 'true', FORCE: '1' }));
+    expect(lines).toEqual(['remove --env=production --yes --json --no-wait-interfaces']);
+  });
+
+  it('never passes --force to another mode, even when the start answer has remove.force', async () => {
+    for (const mode of ['deploy', 'tenants_restore'] as const) {
+      const callsFile = await runRemove({ force: true }, {}, mode);
+      const argv = readFileSync(callsFile, 'utf8').split('\n').filter((l) => l !== '' && !l.startsWith('layer '));
+      expect(argv.some((l) => l.includes('--force'))).toBe(false);
+      expect(argv.some((l) => l.startsWith('remove'))).toBe(false);
+      rmSync(callsFile);
+    }
+  });
+
+  it('isForcedRemove reads only a strict true', () => {
+    expect(isForcedRemove({ remove: { force: true } })).toBe(true);
+    for (const v of [undefined, null, {}, { remove: null }, { remove: { force: 'true' } }, { remove: { force: 1 } }, { remove: [true] }, { force: true }]) {
+      expect(isForcedRemove(v)).toBe(false);
+    }
+  });
+
+  it('forwards remove.step_tenant_count with its params and the error params of remove.tenants_need_force', async () => {
+    await runRemove(undefined, { FAKE_ARCO_REMOVE: 'needforce' });
+    const events = calls.filter((c) => c.path === 'logs').flatMap((c) => c.body.events);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'step', key: 'remove.step_tenant_count', params: { count: 3 } }));
+    expect(calls.at(-1)!.body).toMatchObject({
+      result: 'failed',
+      error_code: 'remove.tenants_need_force',
+      error_params: { count: 3, function: 'shop-production-tenants', environment: 'production' },
+    });
+  });
+});
+
+describe('tenants_restore mode', () => {
+  const run = async (extra: NodeJS.ProcessEnv = {}) => deployAndFinish(await session(), dep('tenants_restore', { ...process.env, ...extra }));
+  beforeEach(() => {
+    startExtra = { mode: 'tenants_restore' };
+  });
+
+  it('runs arco tenants:restore --json with the credentials and the layer, and nothing else', async () => {
+    const callsFile = join(project, 'calls.txt');
+    const dump = join(project, 'env.json');
+    startExtra = { mode: 'tenants_restore', config: { schema: 1, app: 'shop', environments: {} } };
+    const code = await run({ FAKE_ARCO_CALLS: callsFile, FAKE_ARCO_ENVDUMP: dump, FAKE_ARCO_VERSION: '0.25.0' });
+    expect(code).toBe(0);
+    const argv = readFileSync(callsFile, 'utf8').split('\n').filter((l) => l !== '' && !l.startsWith('layer '));
+    expect(argv).toEqual(['--version', 'tenants:restore --env=production --json']);
+    const env = JSON.parse(readFileSync(`${dump}.tenants:restore`, 'utf8'));
+    expect(env).toMatchObject({ AWS_ACCESS_KEY_ID: 'AKIAEXAMPLE12345', AWS_REGION: 'us-east-1', ARCO_TELEMETRY_DISABLE: '1' });
+    expect(env.ARCO_CONFIG_LAYER).toBeTruthy();
+    expect(env).not.toHaveProperty('ARCO_PERMISSIONS_BOUNDARY');
+    expect(env).not.toHaveProperty('ARCO_DEFER_COLD_START');
+    expect(env).not.toHaveProperty('CLOUDFLARE_API_TOKEN');
+    expect(existsSync(env.ARCO_CONFIG_LAYER)).toBe(false);
+    expect(calls.at(-1)!.path).toBe('finish');
+  });
+
+  it('runs no version check and sets no layer without a config', async () => {
+    const callsFile = join(project, 'calls.txt');
+    expect(await run({ FAKE_ARCO_CALLS: callsFile })).toBe(0);
+    const argv = readFileSync(callsFile, 'utf8').split('\n').filter((l) => l !== '');
+    expect(argv).toEqual(['tenants:restore --env=production --json', '--version']);
+  });
+
+  it.each(['restored', 'already_enabled', 'limit_kept', 'nothing_to_restore'])('finishes succeeded for %s', async (outcome) => {
+    expect(await run({ FAKE_ARCO_RESTORE: outcome })).toBe(0);
+    const body = calls.at(-1)!.body;
+    expect(body).toMatchObject({ result: 'succeeded', restore_outcome: outcome, error_code: null, error_message: null, arco_version: '0.10.0' });
+    for (const key of ['url', 'domains', 'inventory', 'notes', 'error_params', 'cold_start_ms', 'cold_start_deferred']) expect(body).not.toHaveProperty(key);
+  });
+
+  it('shows the document in the run log', async () => {
+    await run();
+    const lines = calls.filter((c) => c.path === 'logs').flatMap((c) => c.body.lines);
+    expect(lines.join('\n')).toContain('"outcome": "restored"');
+  });
+
+  it('skips text before the document', async () => {
+    expect(await run({ FAKE_ARCO_RESTORE: 'noise' })).toBe(0);
+    expect(calls.at(-1)!.body).toMatchObject({ result: 'succeeded', restore_outcome: 'restored' });
+  });
+
+  it('a refusal finishes failed with the error key, message and params, redacted', async () => {
+    expect(await run({ FAKE_ARCO_RESTORE: 'refused' })).toBe(1);
+    const body = calls.at(-1)!.body;
+    expect(body).toMatchObject({ result: 'failed', restore_outcome: 'refused', error_code: 'deploy.tenant_mediator_not_owned' });
+    expect(body.error_message).toContain('Not ours');
+    expect(body.error_params).toMatchObject({ function: 'shop-production-tenants', count: 1 });
+    expect(body.error_params).not.toHaveProperty('nested');
+    expect(JSON.stringify(calls)).not.toContain(SECRET);
+  });
+
+  it('a failure without params finishes failed without error_params', async () => {
+    expect(await run({ FAKE_ARCO_RESTORE: 'failed' })).toBe(1);
+    const body = calls.at(-1)!.body;
+    expect(body).toMatchObject({ result: 'failed', restore_outcome: 'failed', error_code: 'tenants.restore_unconfirmed', error_message: 'Still 0' });
+    expect(body).not.toHaveProperty('error_params');
+  });
+
+  it('a success outcome with a non-zero exit is a failure', async () => {
+    expect(await run({ FAKE_ARCO_RESTORE: 'badexit' })).toBe(1);
+    expect(calls.at(-1)!.body).toMatchObject({ result: 'failed', error_code: 'tenants.restore_failed', restore_outcome: 'restored' });
+  });
+
+  it.each(['garbage', 'crash'])('output without a document (%s) finishes failed as arco.no_result', async (mode) => {
+    expect(await run({ FAKE_ARCO_RESTORE: mode })).not.toBe(0);
+    const body = calls.at(-1)!.body;
+    expect(body).toMatchObject({ result: 'failed', error_code: 'arco.no_result' });
+    expect(body).not.toHaveProperty('restore_outcome');
+  });
+
+  it('restore_outcome is dropped when Cloud refuses the report', async () => {
+    const bodies: any[] = [];
+    const api = { finish: async (b: any) => { bodies.push(b); if ('restore_outcome' in b) throw new CloudApiError('invalid', 422, null); } } as unknown as CloudApi;
+    await finishWithRetry(api, { result: 'succeeded', restore_outcome: 'restored' }, async () => {}, () => {});
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).toEqual({ result: 'succeeded' });
+  });
+});
+
+describe('unknown mode', () => {
+  it('runs nothing and finishes failed as client.mode_unsupported', async () => {
+    const callsFile = join(project, 'calls.txt');
+    const code = await deployAndFinish(await session(), { ...dep('deploy', { ...process.env, FAKE_ARCO_CALLS: callsFile }), mode: 'tenants_wipe' as any });
+    expect(code).toBe(1);
+    expect(existsSync(callsFile)).toBe(false);
+    expect(calls.at(-1)!.body).toMatchObject({ result: 'failed', error_code: 'client.mode_unsupported' });
   });
 });
 

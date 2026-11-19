@@ -10,6 +10,7 @@ import {
   isResult,
   parseEventLine,
   parseInventory,
+  parseRestoreDocument,
   parseVersion,
   removeArgs,
   removeNoteOf,
@@ -17,6 +18,8 @@ import {
   runArco,
   toFinishPayload,
   toRemovePayload,
+  toRestorePayload,
+  tenantsRestoreArgs,
   versionArgs,
   type ArcoResult,
   type FinishPayload,
@@ -42,7 +45,7 @@ function isRefused(e: unknown): e is CloudApiError {
 }
 
 /** The optional fields a Cloud may refuse; the result itself never depends on them. */
-const OPTIONAL_FIELDS = ['url', 'domains', 'cold_start_ms', 'cold_start_deferred', 'inventory', 'notes', 'error_params'] as const;
+const OPTIONAL_FIELDS = ['url', 'domains', 'cold_start_ms', 'cold_start_deferred', 'inventory', 'notes', 'error_params', 'restore_outcome'] as const;
 
 /**
  * Reports the result, retrying network errors and 5xx. A refused report (4xx) is not sent again
@@ -214,8 +217,25 @@ export async function startRun(o: StartRunOptions): Promise<RunSession> {
   };
 }
 
+/**
+ * Whether Cloud's start answer asks this Remove run to delete the customer (tenant) domains: `remove.force` must be
+ * exactly `true`. Nothing else (a truthy string or number, an environment variable, the runner's job document, a
+ * retry) may turn on `--force`: it takes the customers' sites offline for good.
+ */
+export function isForcedRemove(started: unknown): boolean {
+  if (typeof started !== 'object' || started === null) return false;
+  const remove = (started as Record<string, unknown>).remove;
+  return typeof remove === 'object' && remove !== null && !Array.isArray(remove) && (remove as Record<string, unknown>).force === true;
+}
+
+/** The run modes this client knows (Cloud's `mode` in the start answer and the runner job document). */
+export const RUN_MODES = ['deploy', 'inventory', 'remove', 'tenants_restore'] as const;
+export type RunMode = (typeof RUN_MODES)[number];
+
+export const isRunMode = (mode: unknown): mode is RunMode => typeof mode === 'string' && (RUN_MODES as readonly string[]).includes(mode);
+
 export interface DeployOptions {
-  mode: 'deploy' | 'inventory' | 'remove';
+  mode: RunMode;
   environment: string;
   cwd: string;
   /** Base environment of the child; the AWS_* variables are added on top. */
@@ -255,6 +275,9 @@ export async function deployAndFinish(s: RunSession, o: DeployOptions): Promise<
     await finishWithRetry(s.api, { ...buildFailure(code, message), arco_version: arcoVersion }, s.sleep, s.warn);
     return 1;
   };
+
+  // A mode this client does not know runs nothing with the credentials.
+  if (!isRunMode(o.mode)) return failEarly('client.mode_unsupported', s.redact(`This runner client does not support the run mode ${JSON.stringify(String(o.mode)).slice(0, 80)}.`));
 
   const layer = s.started.config ?? null;
   let arcoVersion: string | null = null;
@@ -336,9 +359,25 @@ async function runAndFinish(s: RunSession, o: DeployOptions, bin: string, childE
 
   const notes: RemoveNote[] = [];
 
-  if (o.mode === 'remove') {
+  let restoreDoc: Record<string, unknown> | null = null;
+
+  if (o.mode === 'tenants_restore') {
+    // One JSON document on stdout, not NDJSON events: shown in the run log as is (redacted), then parsed whole.
+    // Like a remove: the layer is in childEnv, no boundary, DNS profile, deferred cold start or inventory.
+    const restore = await runArco(tenantsRestoreArgs(o.environment), {
+      ...common,
+      env: childEnv,
+      signal: s.signal,
+      killGraceMs: o.killGraceMs,
+      onStdoutLine: (line) => s.batcher.addLine(line),
+      onStderrLine: (line) => s.batcher.addLine(line),
+    }, bin);
+    exitCode = restore.exitCode;
+    restoreDoc = parseRestoreDocument(restore.stdout);
+  } else if (o.mode === 'remove') {
     // Same stream as deploy; the layer is already in childEnv, and there is no boundary, DNS profile or deferred cold start.
-    const remove = await runArco(removeArgs(o.environment), {
+    // `--force` only when this run's start answer says `remove.force === true`.
+    const remove = await runArco(removeArgs(o.environment, isForcedRemove(s.started)), {
       ...common,
       env: childEnv,
       signal: s.signal,
@@ -397,9 +436,9 @@ async function runAndFinish(s: RunSession, o: DeployOptions, bin: string, childE
   await s.batcher.flush();
   throwIfAborted();
 
-  // Nothing is left to inventory after a remove.
+  // Nothing is left to inventory after a remove, and a restore reports none.
   let inventory: unknown | null = null;
-  if (o.mode !== 'remove') {
+  if (o.mode === 'deploy' || o.mode === 'inventory') {
     const info = await runArco(infoArgs(o.environment), {
       ...common,
       env: childEnv,
@@ -423,6 +462,8 @@ async function runAndFinish(s: RunSession, o: DeployOptions, bin: string, childE
   const rawPayload: FinishPayload =
     o.mode === 'remove'
       ? toRemovePayload(result, exitCode, arcoVersion, notes)
+      : o.mode === 'tenants_restore'
+      ? toRestorePayload(restoreDoc, exitCode, arcoVersion)
       : o.mode === 'deploy'
       ? toFinishPayload(result, exitCode, arcoVersion, inventory)
       : inventory !== null

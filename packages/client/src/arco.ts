@@ -1,5 +1,5 @@
 // The ONLY place that knows Arco's CLI contract (v0.10: `deploy --json` NDJSON,
-// `info --resources --json` document). A contract change should touch just this file.
+// `info --resources --json` document; v0.25: `tenants:restore --json` document). A contract change should touch just this file.
 import { spawn } from 'node:child_process';
 
 /** The project's Composer-installed Arco: the default for Laravel apps. */
@@ -64,14 +64,25 @@ export interface FinishPayload {
   cold_start_deferred?: ColdStartDeferred | null;
   /** Remove mode only: the resources Arco kept and, when it applies, the role kept for the interfaces. */
   notes?: RemoveNote[];
-  /** Remove mode only: the error's `params` (string and number values), e.g. `resources` of `remove.leftovers`. */
+  /** Remove and tenants_restore modes: the error's `params` (string and number values), e.g. `resources` of `remove.leftovers`. */
   error_params?: Record<string, string | number>;
+  /** tenants_restore mode only: the `outcome` of `arco tenants:restore --json`, when Arco reported one. */
+  restore_outcome?: string;
 }
 
 // --json never prompts: a dispatch from Cloud is already user-confirmed, so always pass --yes
 // (otherwise a first deploy of an environment is `refused` with deploy.confirm_required).
 export const deployArgs = (environment: string, extra: string[] = []): string[] => ['deploy', `--env=${environment}`, '--yes', '--json', ...extra];
-export const removeArgs = (environment: string): string[] => ['remove', `--env=${environment}`, '--yes', '--json', '--no-wait-interfaces'];
+// `--force` deletes the environment's customer (tenant) domains: only when Cloud's start answer asked for it.
+export const removeArgs = (environment: string, force = false): string[] => [
+  'remove',
+  `--env=${environment}`,
+  '--yes',
+  '--json',
+  '--no-wait-interfaces',
+  ...(force ? ['--force'] : []),
+];
+export const tenantsRestoreArgs = (environment: string): string[] => ['tenants:restore', `--env=${environment}`, '--json'];
 export const infoArgs = (environment: string): string[] => ['info', `--env=${environment}`, '--resources', '--json'];
 export const versionArgs = (): string[] => ['--version'];
 
@@ -169,11 +180,64 @@ export function toRemovePayload(result: ArcoResult | null, exitCode: number, arc
     errorMessage = errorMessage ?? (result ? `Remove ${result.outcome}` : `Arco exited with code ${exitCode} without a result document`);
   }
   const payload: FinishPayload = { result: removed ? 'removed' : 'failed', revision: null, rolled_back: false, error_code: errorCode, error_message: errorMessage, arco_version: arcoVersion, notes };
-  const params = result?.error?.params;
-  if (!removed && typeof params === 'object' && params !== null && !Array.isArray(params)) {
-    const kept = Object.entries(params).filter((e): e is [string, string | number] => typeof e[1] === 'string' || (typeof e[1] === 'number' && Number.isFinite(e[1])));
-    if (kept.length > 0) payload.error_params = Object.fromEntries(kept);
+  const params = removed ? null : scalarParams(result?.error?.params);
+  if (params !== null) payload.error_params = params;
+  return payload;
+}
+
+/** The string and finite number values of an error's `params`; null when there are none. */
+function scalarParams(params: unknown): Record<string, string | number> | null {
+  if (typeof params !== 'object' || params === null || Array.isArray(params)) return null;
+  const kept = Object.entries(params).filter((e): e is [string, string | number] => typeof e[1] === 'string' || (typeof e[1] === 'number' && Number.isFinite(e[1])));
+  return kept.length > 0 ? Object.fromEntries(kept) : null;
+}
+
+/** The outcomes of `arco tenants:restore` that succeed (exit code 0). */
+export const RESTORE_SUCCESS_OUTCOMES: readonly string[] = ['restored', 'already_enabled', 'limit_kept', 'nothing_to_restore'];
+
+/**
+ * The document `arco tenants:restore --json` prints on stdout (one pretty-printed JSON object, schema 1), or null
+ * when stdout holds none. Text before the document (a stray PHP notice) is skipped.
+ */
+export function parseRestoreDocument(stdout: string): Record<string, unknown> | null {
+  const lines = stdout.split('\n');
+  const start = lines.findIndex((l) => l.startsWith('{'));
+  for (const candidate of [stdout, start > 0 ? lines.slice(start).join('\n') : null]) {
+    if (candidate === null || candidate.trim() === '') continue;
+    try {
+      const value = JSON.parse(candidate);
+      if (typeof value === 'object' && value !== null && !Array.isArray(value) && value.schema === 1) return value as Record<string, unknown>;
+    } catch {
+      // not the document
+    }
   }
+  return null;
+}
+
+/** The finish payload of `arco tenants:restore`: succeeded only for a success outcome with exit code 0. */
+export function toRestorePayload(doc: Record<string, unknown> | null, exitCode: number, arcoVersion: string | null): FinishPayload {
+  const outcome = typeof doc?.outcome === 'string' ? doc.outcome : null;
+  const succeeded = outcome !== null && RESTORE_SUCCESS_OUTCOMES.includes(outcome) && exitCode === 0;
+  const error = typeof doc?.error === 'object' && doc.error !== null && !Array.isArray(doc.error) ? (doc.error as Record<string, unknown>) : null;
+  let errorCode: string | null = succeeded ? null : typeof error?.key === 'string' && error.key !== '' ? error.key : null;
+  let errorMessage: string | null = succeeded ? null : typeof error?.message === 'string' ? error.message : null;
+  if (!succeeded && errorCode === null) {
+    if (doc === null) {
+      errorCode = 'arco.no_result';
+      errorMessage = errorMessage ?? `Arco exited with code ${exitCode} without a result document`;
+    } else if (outcome !== null && !RESTORE_SUCCESS_OUTCOMES.includes(outcome) && /^[a-z_]{1,40}$/.test(outcome)) {
+      errorCode = `tenants.restore_${outcome}`;
+      errorMessage = errorMessage ?? `Tenant domains restore ${outcome}`;
+    } else {
+      errorCode = 'tenants.restore_failed';
+      errorMessage = errorMessage ?? `arco tenants:restore exited with code ${exitCode} (outcome ${outcome ?? 'missing'})`;
+    }
+  }
+  const payload: FinishPayload = { result: succeeded ? 'succeeded' : 'failed', revision: null, rolled_back: false, error_code: errorCode, error_message: errorMessage, arco_version: arcoVersion };
+  // Cloud accepts up to 64 characters; anything else is not an outcome it knows.
+  if (outcome !== null && /^[a-z_]{1,64}$/.test(outcome)) payload.restore_outcome = outcome;
+  const params = succeeded ? null : scalarParams(error?.params);
+  if (params !== null) payload.error_params = params;
   return payload;
 }
 
