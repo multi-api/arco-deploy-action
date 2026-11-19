@@ -3,7 +3,8 @@
 //   FAKE_ARCO_SCENARIO = deployed (default) | failed | refused | leakyfail | crash | opterror
 //   (deploy scenarios hang | stubborn block until killed; stubborn ignores SIGTERM; both append `pid` to FAKE_ARCO_CALLS)
 //   FAKE_ARCO_ENVDUMP  = file to write the child's environment (JSON) to
-//   FAKE_ARCO_REMOVE   = removed (default) | kept (kept resources + role kept for interfaces) | leftovers | refused | crash   (the `remove` command)
+//   FAKE_ARCO_REMOVE   = removed (default) | kept (kept resources + role kept for interfaces) | leftovers | needforce | refused | crash   (the `remove` command)
+//   FAKE_ARCO_RESTORE  = restored (default) | already_enabled | limit_kept | nothing_to_restore | refused | failed | badexit | noise | garbage | crash   (`tenants:restore`)
 //   FAKE_ARCO_INFO     = ok (default) | bad | fail
 //   FAKE_ARCO_CALLS    = file to append each invocation's argv to
 //   FAKE_ARCO_VERSION  = hang: `--version` blocks until killed; fail: exits 1; anything else: the version printed (default 0.10.0)
@@ -95,12 +96,43 @@ if (args[0] === '--version') {
     emit({ ...base, outcome: 'refused', error: null });
     process.exit(1);
   }
+  if (mode === 'needforce') {
+    emit({ type: 'step', key: 'remove.step_tenant_count', status: 'note', params: { count: 3 } });
+    emit({ ...base, outcome: 'refused', error: { key: 'remove.tenants_need_force', message: 'Customer domains exist (3)', params: { count: 3, function: 'shop-production-tenants', environment: 'production' } } });
+    process.exit(1);
+  }
   if (mode === 'leftovers') {
     emit({ type: 'step', key: 'remove.resource_kept', status: 'note', params: { type: 'queue', name: 'jobs' } });
     emit({ ...base, outcome: 'failed', error: { key: 'remove.leftovers', message: `Something was left: denied for ${process.env.AWS_SECRET_ACCESS_KEY}`, params: { resources: 'lambda:function shop-production-console, iam:role arco-shop-production-network', detail: `denied for ${process.env.AWS_SECRET_ACCESS_KEY}`, count: 2, nested: { x: 1 } } } });
     process.exit(1);
   }
   emit({ ...base, outcome: 'removed', error: null });
+} else if (args[0] === 'tenants:restore') {
+  // One pretty-printed document on stdout, like Arco's JSON_PRETTY_PRINT.
+  const mode = process.env.FAKE_ARCO_RESTORE ?? 'restored';
+  const doc = (o) => console.log(JSON.stringify({ schema: 1, app: 'shop', environment: 'production', function: 'shop-production-tenants', ...o }, null, 4));
+  if (mode === 'crash') {
+    console.error('PHP Fatal error: boom');
+    process.exit(255);
+  }
+  if (mode === 'garbage') {
+    console.log('Command "tenants:restore" is not defined.');
+    process.exit(1);
+  }
+  if (mode === 'refused') {
+    doc({ outcome: 'refused', error: { key: 'deploy.tenant_mediator_not_owned', message: `Not ours: denied for ${process.env.AWS_SECRET_ACCESS_KEY}`, params: { function: 'shop-production-tenants', detail: `denied for ${process.env.AWS_SECRET_ACCESS_KEY}`, count: 1, nested: { x: 1 } } } });
+    process.exit(1);
+  }
+  if (mode === 'failed') {
+    doc({ outcome: 'failed', error: { key: 'tenants.restore_unconfirmed', message: 'Still 0' } });
+    process.exit(1);
+  }
+  if (mode === 'badexit') {
+    doc({ outcome: 'restored', reservedConcurrency: null });
+    process.exit(1);
+  }
+  if (mode === 'noise') console.log('PHP Deprecated: something');
+  doc({ outcome: mode === 'noise' ? 'restored' : mode, reservedConcurrency: mode === 'limit_kept' ? 5 : null });
 } else if (args[0] === 'info') {
   const mode = process.env.FAKE_ARCO_INFO ?? 'ok';
   if (mode === 'fail') process.exit(1);

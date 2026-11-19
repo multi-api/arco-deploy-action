@@ -54,7 +54,7 @@ describe('CloudApi.start', () => {
       return Response.json({});
     });
     await new CloudApi('https://cloud.test', 't', 'dep_1').start('n');
-    expect(body.capabilities).toEqual(['external_dns', 'extensions']);
+    expect(body.capabilities).toEqual(['external_dns', 'extensions', 'tenant_domains']);
     expect(body.supports_config_layer).toBe(true);
   });
 });

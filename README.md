@@ -50,6 +50,32 @@ base environment).
 
 Requires Arco >= 0.10 (`--json` output). All Arco output parsing lives in `packages/client/src/arco.ts`.
 
+### Client run modes and capabilities
+
+The action itself runs `deploy` and `inventory`. `@multiapi/arco-cloud-client` (used by Arco Cloud's own runner too)
+knows four modes (`RUN_MODES`); `deployAndFinish` with any other runs nothing and finishes as
+`client.mode_unsupported`:
+
+| Mode | Arco commands | Finish `result` |
+|---|---|---|
+| `deploy` | `deploy --env=<env> --yes --json`, then `info --resources --json` | `succeeded` / `failed` |
+| `inventory` | `info --resources --json` | `succeeded` / `failed` |
+| `remove` | `remove --env=<env> --yes --json --no-wait-interfaces` (`--force` only when `start` says so, see below) | `removed` / `failed` |
+| `tenants_restore` | `tenants:restore --env=<env> --json` | `succeeded` / `failed` |
+
+`start` sends `capabilities: ["external_dns", "extensions", "tenant_domains"]` and `supports_config_layer: true`.
+`tenant_domains` means the client implements Arco Cloud's customer (tenant) domains contract (multiapi/arco 0.25.0
+or later); without it Cloud refuses those runs with `409 client_outdated` and issues no credentials:
+
+- **Forced remove.** `--force` deletes the environment's customer domains, so it is appended to `arco remove` if and
+  only if the `start` answer has `remove.force === true` (a strict boolean). Nothing else turns it on: not
+  `"true"` or `1`, not an environment variable, not the runner's job document, not another mode.
+- **`tenants_restore`.** Runs `arco tenants:restore --env=<env> --json` with the config layer, like a remove (no
+  build, deploy, DNS profile, permissions boundary or `info`), and finishes `succeeded` for the outcomes
+  `restored`, `already_enabled`, `limit_kept` and `nothing_to_restore` (exit code 0), else `failed` with
+  `error_code`, `error_message` and `error_params` from the document's `error` (`arco.no_result` when stdout holds no
+  document). `restore_outcome` carries Arco's `outcome` when there is one.
+
 ### Arco Cloud extensions
 
 Cloud's `start` answer can carry `extensions`: a map from a key (`/^[a-z][a-z0-9-]*$/`) to
